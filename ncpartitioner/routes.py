@@ -41,18 +41,25 @@ def ncpartitioner():
     # timestamp to avoid filename collision.
     timestamp = int(time.time())
 
+    # remove extension from filename
+    (filepath, extension) = filepath.split(".")
+
     logger.info(f"Partitioning file")
     subprocess.run(
         [
             "ncks",
             *dim_args,
-            f"/{filepath}",
-            os.path.join(output_dir, f"{os.path.basename(filepath)}{timestamp}"),
+            f"/{filepath}.{extension}",
+            os.path.join(
+                output_dir, f"{os.path.basename(filepath)}_{timestamp}.{extension}"
+            ),
         ],
         check=True,
     )
     logger.info(
-        f"Partition complete; file saved to {os.path.join(output_dir, f'{os.path.basename(filepath)}{timestamp}')}"
+        f"Partition complete; file saved to {os.path.join(output_dir, f'{os.path.basename(filepath)}_{timestamp}.{extension}')}"
     )
 
-    return redirect(f"{thredds_base}/{os.path.basename(filepath)}{timestamp}")
+    return redirect(
+        f"{thredds_base}/{os.path.basename(filepath)}_{timestamp}.{extension}"
+    )
