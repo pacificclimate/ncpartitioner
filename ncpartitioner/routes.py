@@ -59,8 +59,10 @@ def ncpartitioner():
     logger.info(
         f"Partition complete; file saved to {os.path.join(output_dir, f'{os.path.basename(filepath)}_{timestamp}.{extension}')}"
     )
-    logger.info(f"Sending redirect to {thredds_base}/{os.path.basename(filepath)}_{timestamp}.{extension}")
+    logger.info(
+        f"Sending redirect to {thredds_base}{output_dir}{os.path.basename(filepath)}_{timestamp}.{extension}"
+    )
 
     return redirect(
-        f"{thredds_base}/{os.path.basename(filepath)}_{timestamp}.{extension}"
+        f"{thredds_base}{output_dir}{os.path.basename(filepath)}_{timestamp}.{extension}"
     )
