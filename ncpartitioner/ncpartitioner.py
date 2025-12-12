@@ -40,7 +40,7 @@ def sanitize_inputs(filepath, targets):
     # check requested filepath, and fetch metadata from THREDDS.
     # file path must start with /storage and be a file this container has access to
     if not filepath.startswith("storage/"):
-        raise ValueError(f"Invalid filepath: must start with /storage/ {filepath}")
+        raise ValueError(f"Invalid filepath: must start with storage/ : {filepath}")
     if not filepath.endswith(".nc"):
         raise ValueError(f"Invalid filepath: must be a .nc file {filepath}")
     if not os.path.isfile(f"/{filepath}"):
