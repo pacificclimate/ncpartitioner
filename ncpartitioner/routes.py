@@ -48,13 +48,15 @@ def ncpartitioner():
         ],
         check=True,
     )
+    
+    output_filename = f"{args['basename']}_{args['timestamp']}.{args['extension']}"
     logger.info(
-        f"Partition complete; file saved to {os.path.join(output_dir, f'{os.path.basename(filepath)}_{timestamp}.{extension}')}"
+        f"Partition complete; file saved to {os.path.join(output_dir, output_filename)}"
     )
     logger.info(
-        f"Sending redirect to {thredds_base}{output_dir}{os.path.basename(filepath)}_{timestamp}.{extension}"
+        f"Sending redirect to {thredds_base}{output_dir}/{output_filename}"
     )
 
     return redirect(
-        f"{thredds_base}{output_dir}{args['basename']}_{args['timestamp']}.{args['extension']}"
+        f"{thredds_base}{output_dir}/{output_filename}"
     )

@@ -12,4 +12,4 @@ ENV PATH="/root/.local/bin:$PATH"
 RUN poetry install
 
 EXPOSE 5000
-CMD ["poetry", "run", "flask", "run", "-p", "5000", "-h", "0.0.0.0", "--debug"]
+CMD ["poetry", "run", "gunicorn", "--workers=10", "--bind=0.0.0.0:5000", "wsgi:app"]
