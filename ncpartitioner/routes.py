@@ -1,8 +1,7 @@
 from flask import Blueprint, request, redirect
-from ncpartitioner.ncpartitioner import sanitize_inputs
-import subprocess
+from ncpartitioner.sanitize import check_filepath, check_targets
+from ncpartitioner.response import partition, dds, das
 import logging
-import os
 
 logger = logging.getLogger(__name__)
 
@@ -14,49 +13,21 @@ def ncpartitioner():
     """creates the requested netCDF with NCO, moves it to where THREDDS can serve it, and returns a link to the user"""
     filepath = request.args.get("filepath")
     targets = request.args.get("targets", None)
-    output_dir = os.getenv("OUTPUT_DIR")
-    thredds_base = os.getenv("THREDDS_HTTP_BASE")
 
-    logger.info(
-        f"Received partition request: filepath={filepath}, targets={targets}, output_dir={output_dir}"
-    )
     try:
-        args = sanitize_inputs(filepath, targets)
+        args = check_filepath(filepath)
     except ValueError as ve:
         logger.error(f"Input error: {ve}")
         return f"Input error: {ve}", 400
 
-    print(args)
-
-    logger.info(f"Partitioning file")
-    subprocess.run(
-        [
-            "ncks",
-            "-v",
-            f"{args['variable']}",
-            "-d",
-            f"time,{args['time'][0]},{args['time'][1]}",
-            "-d",
-            f"lat,{args['lat'][0]},{args['lat'][1]}",
-            "-d",
-            f"lon,{args['lon'][0]},{args['lon'][1]}",
-            f"/{args['dirname']}/{args['basename']}.{args['extension']}",
-            os.path.join(
-                output_dir,
-                f"{args['basename']}_{args['timestamp']}.{args['extension']}",
-            ),
-        ],
-        check=True,
-    )
-    
-    output_filename = f"{args['basename']}_{args['timestamp']}.{args['extension']}"
-    logger.info(
-        f"Partition complete; file saved to {os.path.join(output_dir, output_filename)}"
-    )
-    logger.info(
-        f"Sending redirect to {thredds_base}{output_dir}/{output_filename}"
-    )
-
-    return redirect(
-        f"{thredds_base}{output_dir}/{output_filename}"
-    )
+    if args["request_format"] == "dds":
+        return dds(args)
+    elif args["request_format"] == "das":
+        return das(args)
+    elif args["request_format"] == "nc":
+        try:
+            args.update(check_targets(targets))
+        except ValueError as ve:
+            logger.error(f"Input error: {ve}")
+            return f"Input error: {ve}", 400
+        return partition(args)
