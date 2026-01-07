@@ -1,6 +1,7 @@
 import re
 import os
 import time
+import subprocess
 
 
 def check_filepath(filepath):
@@ -19,8 +20,11 @@ def check_filepath(filepath):
     # check requested filepath, and fetch metadata from THREDDS.
     # file path must start with /storage and be a file this container has access to
     # remaining filepath must end with .nc
-    if not filepath.startswith("storage/"):
-        raise ValueError(f"Invalid filepath: must start with storage/ : {filepath}")
+
+    # Flask strips the leading slash from the filepath argument, so we strip it here (and add it later)
+    data_root = os.getenv("DATA_ROOT".lstrip("/"), "storage/")
+    if not filepath.startswith(data_root):
+        raise ValueError(f"Invalid filepath: must start with {data_root} : {filepath}")
     if not filepath.endswith(".nc"):
         raise ValueError(f"Invalid filepath: must be a .nc file {filepath}")
     if not os.path.isfile(f"/{filepath}"):
@@ -72,12 +76,47 @@ def check_targets(targets):
                 raise ValueError(f"Invalid target format: {t}")
     # make sure all required dimensions and a variable are present.
     for att in ["time", "lat", "lon", "variable"]:
-        if att not in args:
+        if att not in args or args[att] is None:
             raise ValueError(f"Missing required target dimension or variable: {att}")
     return args
 
 
 def check_ranges(args):
     """make sure requested ranges are valid for the file"""
-    # todo - get dds from THREDDS and check ranges against file dimensions
+    # grab netcdf metadata via ncks, parse it, and compare to requested ranges
+    metadata = subprocess.check_output(
+        ["ncks", "-m", f"/{args['dirname']}/{args['basename']}.{args['extension']}"]
+    ).decode("utf-8")
+
+    # make sure this file contains this variable, and it has the relevant dimensions
+    varreg = re.search(rf"{args['variable']}\((.+),(.+),(.+)\)", metadata)
+    if not varreg:
+        raise ValueError(f"Variable {args['variable']} not found in file")
+    for dim in ["time", "lat", "lon"]:
+        if dim not in varreg.groups():
+            raise ValueError(
+                f"Variable {args['variable']} does not have dimension {dim}"
+            )
+
+    # get dimension sizes and compare against request
+    for dim in ["lat", "lon", "time"]:
+        dim_size = -1
+        dimreg = re.search(rf"    {dim} = (\d+) ;", metadata)
+        if dimreg:
+            dim_size = int(dimreg.group(1))
+        else:  # for unlimited dimensions (normally time)
+            dimreg = re.search(
+                rf"    {dim} = UNLIMITED ; \/\/ \((\d+) currently)", metadata
+            )
+            if dimreg:
+                dim_size = int(dimreg.group(1))
+
+        if dim_size >= 0:
+            if args[dim][1] >= dim_size:
+                raise ValueError(
+                    f"Requested range for dimension {dim} exceeds file size: requested end {args[dim][1]}, file size {dim_size}"
+                )
+        else:
+            raise ValueError(f"Dimension {dim} not found in file")
+
     return args
