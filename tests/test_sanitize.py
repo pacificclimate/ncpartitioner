@@ -68,3 +68,37 @@ def test_check_targets(targets, valid, error):
         with pytest.raises(ValueError) as excinfo:
             check_targets(targets)
         assert str(excinfo.value).startswith(error)
+
+
+@pytest.mark.parametrize(
+    "args, valid, error",
+    [
+        (
+            {"time": (0, 100), "lat": (0, 50), "lon": (0, 100), "variable": "tasmax"},
+            True,
+            None,
+        ),
+        (
+            {"time": (0, 100), "lat": (0, 50), "lon": (0, 100), "variable": "pr"},
+            False,
+            "Variable pr not found in file",
+        ),
+        (
+            {"time": (0, 200), "lat": (0, 50), "lon": (0, 100), "variable": "tasmax"},
+            False,
+            "Requested range for dimension time exceeds file size",
+        ),
+    ],
+)
+def test_check_ranges(args, valid, error):
+    args["basename"] = "tasmax"
+    args["dirname"] = os.path.abspath("tests/data")
+    args["extension"] = "nc"
+
+    if valid:
+        # currently no range checks implemented, so just call the function
+        check_ranges(args)
+    else:
+        with pytest.raises(ValueError) as excinfo:
+            check_ranges(args)
+        assert str(excinfo.value).startswith(error)

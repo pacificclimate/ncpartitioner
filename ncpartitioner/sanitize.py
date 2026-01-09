@@ -106,7 +106,7 @@ def check_ranges(args):
             dim_size = int(dimreg.group(1))
         else:  # for unlimited dimensions (normally time)
             dimreg = re.search(
-                rf"    {dim} = UNLIMITED ; \/\/ \((\d+) currently)", metadata
+                rf"    {dim} = UNLIMITED ; \/\/ \((\d+) currently\)", metadata
             )
             if dimreg:
                 dim_size = int(dimreg.group(1))

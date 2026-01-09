@@ -1,5 +1,5 @@
 from flask import Blueprint, request, redirect
-from ncpartitioner.sanitize import check_filepath, check_targets
+from ncpartitioner.sanitize import check_filepath, check_targets, check_ranges
 from ncpartitioner.response import partition, dds, das
 import logging
 
@@ -27,6 +27,7 @@ def ncpartitioner():
     elif args["request_format"] == "nc":
         try:
             args.update(check_targets(targets))
+            check_ranges(args)
         except ValueError as ve:
             logger.error(f"Input error: {ve}")
             return f"Input error: {ve}", 400
