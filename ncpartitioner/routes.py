@@ -31,4 +31,8 @@ def ncpartitioner():
         except ValueError as ve:
             logger.error(f"Input error: {ve}")
             return f"Input error: {ve}", 400
+
+        logger.info(
+            f"Received partition request: filepath={filepath}, targets={targets}"
+        )
         return partition(args)

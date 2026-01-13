@@ -2,6 +2,7 @@
 In cases of DDS and DAS, the file already exists; for data requests the filemust be created first.
 """
 
+from posixpath import dirname
 import subprocess
 import os
 from flask import redirect
@@ -11,12 +12,10 @@ logger = logging.getLogger(__name__)
 
 
 def partition(args):
-    logger.info(
-        f"Received partition request: filepath={filepath}, targets={targets}, output_dir={output_dir}"
-    )
     output_dir = os.getenv("OUTPUT_DIR")
     thredds_base = os.getenv("THREDDS_HTTP_BASE")
 
+    print("args are:")
     print(args)
 
     logger.info(f"Partitioning file")
@@ -49,21 +48,21 @@ def partition(args):
     return redirect(f"{thredds_base}{output_dir}/{output_filename}")
 
 
-def dds(args):
-    logger.info(f"Received DDS request: filepath={filepath}")
-    # this is wrong.
+def dap_filepath(args):
+    """construct the filepath for DDS/DAS requests"""
     thredds_base = os.getenv("THREDDS_DAP_BASE")
+    return f"{thredds_base}/{args['dirname']}/{args['basename']}.{args['extension']}"
 
-    return redirect(
-        f"{thredds_base}/{args['dirname']}/{args['basename']}.{args['extension']}.dds"
-    )
+
+def dds(args):
+    filepath = dap_filepath(args)
+    logger.info(f"Received DDS request: filepath={filepath}")
+
+    return redirect(f"{filepath}.dds")
 
 
 def das(args):
+    filepath = dap_filepath(args)
     logger.info(f"Received DAS request: filepath={filepath}")
-    # this is wrong.
-    thredds_base = os.getenv("THREDDS_DAP_BASE")
 
-    return redirect(
-        f"{thredds_base}/{args['dirname']}/{args['basename']}.{args['extension']}.das"
-    )
+    return redirect(f"{filepath}.das")

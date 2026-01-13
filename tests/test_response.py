@@ -1,0 +1,92 @@
+import re
+from ncpartitioner.response import partition, dds, das
+import os
+import pytest
+import subprocess
+
+args = {
+    "basename": "tasmax",
+    "dirname": "tests/data",
+    "extension": "nc",
+    "timestamp": 1234567890,
+}
+
+
+def test_dds():
+    response = dds(args)
+    assert response.status_code == 302
+    assert (
+        response.location == f"{os.getenv('THREDDS_DAP_BASE')}/tests/data/tasmax.nc.dds"
+    )
+
+
+def test_das():
+    response = das(args)
+    assert response.status_code == 302
+    assert (
+        response.location == f"{os.getenv('THREDDS_DAP_BASE')}/tests/data/tasmax.nc.das"
+    )
+
+
+@pytest.mark.parametrize(
+    "targets,timestamp",
+    [
+        (
+            {"time": (0, 10), "lat": (0, 10), "lon": (0, 10), "variable": "tasmax"},
+            1,
+        ),
+        (
+            {"time": (0, 50), "lat": (0, 10), "lon": (0, 10), "variable": "tasmax"},
+            2,
+        ),
+        (
+            {"time": (0, 50), "lat": (0, 50), "lon": (0, 99), "variable": "tasmax"},
+            3,
+        ),
+        (
+            {"time": (0, 1), "lat": (0, 1), "lon": (0, 1), "variable": "tasmax"},
+            4,
+        ),
+    ],
+)
+def test_partition(targets, timestamp):
+    args.update(targets)
+
+    args["timestamp"] = timestamp
+    filepath = os.path.abspath("tests/data/")
+    args["filepath"] = filepath
+
+    # check that redirection looks correct
+    response = partition(args)
+    assert response.status_code == 302
+    expected_location = f"{os.getenv('THREDDS_HTTP_BASE')}{os.getenv('OUTPUT_DIR')}/tasmax_{timestamp}.nc"
+    assert response.location == expected_location
+
+    # check that file was created and has expected variables and dimensions
+    outfile = os.path.join(
+        os.path.abspath(os.getenv("OUTPUT_DIR")), f"tasmax_{timestamp}.nc"
+    )
+    print("outfile is:", outfile)
+    assert os.path.isfile(outfile)
+    metadata = subprocess.check_output(["ncks", "-m", outfile]).decode("utf-8")
+
+    # make sure file contains requested variable
+    varreg = re.search(rf"{args['variable']}\((.+),(.+),(.+)\)", metadata)
+    assert varreg is not None
+
+    # make sure dimensions match requested ranges
+    for dim in ["lat", "lon", "time"]:
+        dim_size = -1
+        dimreg = re.search(rf"    {dim} = (\d+) ;", metadata)
+        if dimreg:
+            dim_size = int(dimreg.group(1))
+        else:  # for unlimited dimensions (normally time)
+            dimreg = re.search(
+                rf"    {dim} = UNLIMITED ; \/\/ \((\d+) currently\)", metadata
+            )
+            if dimreg:
+                dim_size = int(dimreg.group(1))
+        assert dim_size == args[dim][1] - args[dim][0] + 1
+
+    # clean up created file
+    os.remove(os.path.join(os.getenv("OUTPUT_DIR"), f"tasmax_{timestamp}.nc"))
