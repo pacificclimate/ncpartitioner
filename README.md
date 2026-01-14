@@ -12,7 +12,7 @@ github clone http://github.com/pacificclimate/ncpartitioner
 poetry install
 ```
 
-To do end-to-end testing, you will also need a THREDDS instance running on your workstation, though the partitioning functionality can be tested without THREDDS. Set the environment variables:
+To do end-to-end testing, you will also need a THREDDS instance running on your workstation, though the test suite doesnot need a THREDDS instance. Set the environment variables:
 
 * `OUTPUT_DIR` - file directory to put the partitioned files in. It should be accessible to THREDDS
 * `THREDDS_HTTP_BASE` - the base URL for the THREDDS http server (probably ends /fileserver); a user will be redirected to download the completed file
