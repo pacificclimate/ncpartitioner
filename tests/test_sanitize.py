@@ -92,7 +92,8 @@ def test_check_targets(targets, valid, error):
 )
 def test_check_ranges(args, valid, error):
     args["basename"] = "tasmax"
-    args["dirname"] = os.path.abspath("tests/data")
+    dirname = os.path.abspath("tests/data/")
+    args["dirname"] = dirname
     args["extension"] = "nc"
 
     if valid:
