@@ -11,6 +11,7 @@ partition = Blueprint("partition", __name__, url_prefix="/partition")
 @partition.route("/", methods=["GET"])
 def ncpartitioner():
     """creates the requested netCDF with NCO, moves it to where THREDDS can serve it, and returns a link to the user"""
+    logger.info(f"received request {request.url}")
     filepath = request.args.get("filepath")
     targets = request.args.get("targets", None)
 
