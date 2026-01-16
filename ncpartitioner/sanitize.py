@@ -18,15 +18,19 @@ def check_filepath(filepath):
     args["request_format"] = request_format.lstrip(".")
 
     # check requested filepath, and fetch metadata from THREDDS.
-    # file path must start with /storage and be a file this container has access to
+    # file path must start with DATA_ROOT and be a file this container has access to
     # remaining filepath must end with .nc
 
     # Flask strips the leading slash from the filepath argument, so we strip it here (and add it later)
     data_root = os.getenv("DATA_ROOT".lstrip("/"), "storage/")
     if not filepath.startswith(data_root):
         raise ValueError(f"Invalid filepath: must start with {data_root} : {filepath}")
-    if not filepath.endswith(".nc"):
+    # reamining filepath may end in .nc, or may be missing an extension, but must not have any
+    # other extension.
+    if not filepath.endswith(".nc") and "." in filepath:
         raise ValueError(f"Invalid filepath: must be a .nc file {filepath}")
+    if not "." in filepath:  # add "missing" extension
+        filepath = f"{filepath}.nc"
     if not os.path.isfile(f"/{filepath}"):
         raise ValueError(
             f"Invalid filepath: file does not exist or is not accessible. {filepath}"
