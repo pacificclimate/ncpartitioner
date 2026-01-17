@@ -6,7 +6,7 @@ from ncpartitioner.sanitize import (
     check_ranges,
     check_targets_ascii,
 )
-from ncpartitioner.response import partition, dds, das
+from ncpartitioner.response import partition, dds, das, asc
 import logging
 
 logger = logging.getLogger(__name__)
@@ -46,4 +46,4 @@ def ncpartitioner():
         return partition(args)
     elif args["request_format"] in ["ascii", "asc"]:
         args.update(check_targets_ascii(targets))
-        return ascii(args)
+        return asc(args)

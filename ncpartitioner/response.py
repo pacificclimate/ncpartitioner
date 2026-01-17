@@ -69,8 +69,8 @@ def das(args):
     return redirect(f"{filepath}.das")
 
 
-def ascii(args):
-    # returns requested dimension data in ASCCII format; this function does not return gridded data.
+def asc(args):
+    # returns requested dimension data in ASCII format; this function does not return gridded data.
     filepath = dap_filepath(args)
     dims = (
         args["target"] if isinstance(args["target"], str) else ",".join(args["target"])
