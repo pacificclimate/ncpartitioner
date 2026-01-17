@@ -1,5 +1,10 @@
 from flask import Blueprint, request, redirect
-from ncpartitioner.sanitize import check_filepath, check_targets, check_ranges
+from ncpartitioner.sanitize import (
+    check_filepath,
+    check_targets_partition,
+    check_targets_dds,
+    check_ranges,
+)
 from ncpartitioner.response import partition, dds, das
 import logging
 
@@ -22,12 +27,13 @@ def ncpartitioner():
         return f"Input error: {ve}", 400
 
     if args["request_format"] == "dds":
+        args.update(check_targets_dds(targets, args))
         return dds(args)
     elif args["request_format"] == "das":
         return das(args)
     elif args["request_format"] == "nc":
         try:
-            args.update(check_targets(targets))
+            args.update(check_targets_partition(targets))
             check_ranges(args)
         except ValueError as ve:
             logger.error(f"Input error: {ve}")

@@ -57,7 +57,8 @@ def dap_filepath(args):
 def dds(args):
     filepath = dap_filepath(args)
     logger.info(f"Received DDS request: filepath={filepath}")
-
+    if "target" in args:
+        return redirect(f"{filepath}.dds?{args['target']}")
     return redirect(f"{filepath}.dds")
 
 

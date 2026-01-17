@@ -45,7 +45,7 @@ def check_filepath(filepath):
     return args
 
 
-def check_targets(targets):
+def check_targets_partition(targets):
     args = {"variable": None}
 
     # parse target ranges - make sure they're all numerical
@@ -83,6 +83,31 @@ def check_targets(targets):
         if att not in args or args[att] is None:
             raise ValueError(f"Missing required target dimension or variable: {att}")
     return args
+
+
+def check_targets_dds(targets, args):
+    """targets may specify a single variable, or may not be given at all"""
+    if targets is not None:
+        if targets in ["lat", "lon", "time"]:  # an expected dimension
+            return {"target": targets}
+        elif re.match(r"^[a-zA-Z0-9_]+$", targets):  # a possible variable name
+            # see if variable exists in file
+            metadata = subprocess.check_output(
+                [
+                    "ncks",
+                    "-m",
+                    f"/{args['dirname']}/{args['basename']}.{args['extension']}",
+                ]
+            ).decode("utf-8")
+            varreg = re.search(rf"{targets}\((.+),(.+),(.+)\)", metadata)
+            if varreg:
+                return {"target": targets}
+            else:
+                raise ValueError(f"Variable {targets} not found in file")
+        else:
+            raise ValueError(f"Invalid target for DDS request: {targets}")
+    else:
+        return {}
 
 
 def check_ranges(args):
