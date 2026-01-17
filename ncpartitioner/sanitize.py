@@ -45,8 +45,8 @@ def check_filepath(filepath):
     return args
 
 
-def check_targets_partition(targets):
-    """make sure targets are valid for a data partition request, must be dimension[start:end] format"""
+def check_targets_slice(targets):
+    """make sure targets are valid for a data slice request, must be dimension[start:end] format"""
     args = {"variable": None}
 
     # parse target ranges - make sure they're all numerical

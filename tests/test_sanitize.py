@@ -1,7 +1,7 @@
 import pytest
 import os
 
-from ncpartitioner.sanitize import check_filepath, check_targets_partition, check_ranges
+from ncpartitioner.sanitize import check_filepath, check_targets_slice, check_ranges
 
 
 @pytest.mark.parametrize(
@@ -60,13 +60,13 @@ def test_check_filepath(filepath, valid, error):
 )
 def test_check_targets(targets, valid, error):
     if valid:
-        args = check_targets_partition(targets)
+        args = check_targets_slice(targets)
         # not checking result values, just make sure args is populated
         for att in ["time", "lat", "lon", "variable"]:
             assert att in args
     else:
         with pytest.raises(ValueError) as excinfo:
-            check_targets_partition(targets)
+            check_targets_slice(targets)
         assert str(excinfo.value).startswith(error)
 
 

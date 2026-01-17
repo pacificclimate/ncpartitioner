@@ -11,14 +11,11 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def partition(args):
+def slice(args):
     output_dir = os.getenv("OUTPUT_DIR")
     thredds_base = os.getenv("THREDDS_HTTP_BASE")
 
-    print("args are:")
-    print(args)
-
-    logger.info(f"Partitioning file")
+    logger.info(f"Slicing file")
     subprocess.run(
         [
             "ncks",
@@ -41,7 +38,7 @@ def partition(args):
 
     output_filename = f"{args['basename']}_{args['timestamp']}.{args['extension']}"
     logger.info(
-        f"Partition complete; file saved to {os.path.join(output_dir, output_filename)}"
+        f"Slice complete; file saved to {os.path.join(output_dir, output_filename)}"
     )
     logger.info(f"Sending redirect to {thredds_base}{output_dir}/{output_filename}")
 

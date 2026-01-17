@@ -1,12 +1,12 @@
 from flask import Blueprint, request, redirect
 from ncpartitioner.sanitize import (
     check_filepath,
-    check_targets_partition,
+    check_targets_slice,
     check_targets_dds,
     check_ranges,
     check_targets_ascii,
 )
-from ncpartitioner.response import partition, dds, das, asc
+from ncpartitioner.response import slice, dds, das, asc
 import logging
 
 logger = logging.getLogger(__name__)
@@ -34,16 +34,14 @@ def ncpartitioner():
         return das(args)
     elif args["request_format"] == "nc":
         try:
-            args.update(check_targets_partition(targets))
+            args.update(check_targets_slice(targets))
             check_ranges(args)
         except ValueError as ve:
             logger.error(f"Input error: {ve}")
             return f"Input error: {ve}", 400
 
-        logger.info(
-            f"Received partition request: filepath={filepath}, targets={targets}"
-        )
-        return partition(args)
+        logger.info(f"Received slice request: filepath={filepath}, targets={targets}")
+        return slice(args)
     elif args["request_format"] in ["ascii", "asc"]:
         args.update(check_targets_ascii(targets))
         return asc(args)

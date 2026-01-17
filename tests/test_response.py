@@ -1,5 +1,5 @@
 import re
-from ncpartitioner.response import partition, dds, das
+from ncpartitioner.response import slice, dds, das
 import os
 import pytest
 import subprocess
@@ -49,7 +49,7 @@ def test_das():
         ),
     ],
 )
-def test_partition(targets, timestamp):
+def test_slice(targets, timestamp):
     args.update(targets)
 
     args["timestamp"] = timestamp
@@ -57,7 +57,7 @@ def test_partition(targets, timestamp):
     args["filepath"] = filepath
 
     # check that redirection looks correct
-    response = partition(args)
+    response = slice(args)
     assert response.status_code == 302
     expected_location = f"{os.getenv('THREDDS_HTTP_BASE')}{os.getenv('OUTPUT_DIR')}/tasmax_{timestamp}.nc"
     assert response.location == expected_location
