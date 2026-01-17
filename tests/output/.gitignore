@@ -1,0 +1,3 @@
+# .gitignore file to support empty directory
+*
+!.gitignore

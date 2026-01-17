@@ -66,7 +66,6 @@ def test_slice(targets, timestamp):
     outfile = os.path.join(
         os.path.abspath(os.getenv("OUTPUT_DIR")), f"tasmax_{timestamp}.nc"
     )
-    print("outfile is:", outfile)
     assert os.path.isfile(outfile)
     metadata = subprocess.check_output(["ncks", "-m", outfile]).decode("utf-8")
 
