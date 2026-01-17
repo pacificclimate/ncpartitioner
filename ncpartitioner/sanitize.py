@@ -11,9 +11,9 @@ def check_filepath(filepath):
     # filepaths have an extra suffix to indicate what format the user wants
     # the response in. Valid options are .nc (data request),.dds amd .das (metadata requests)
     (filepath, request_format) = os.path.splitext(filepath)
-    if request_format not in [".nc", ".dds", ".das"]:
+    if request_format not in [".nc", ".dds", ".das", ".ascii", ".asc"]:
         raise ValueError(
-            f"Invalid request format: must be .nc, .dds, or .das : {request_format}"
+            f"Invalid request format: must be .nc, .dds, .das, or .ascii/.asc : {request_format}"
         )
     args["request_format"] = request_format.lstrip(".")
 
@@ -46,6 +46,7 @@ def check_filepath(filepath):
 
 
 def check_targets_partition(targets):
+    """make sure targets are valid for a data partition request, must be dimension[start:end] format"""
     args = {"variable": None}
 
     # parse target ranges - make sure they're all numerical
@@ -86,7 +87,7 @@ def check_targets_partition(targets):
 
 
 def check_targets_dds(targets, args):
-    """targets may specify a single variable, or may not be given at all"""
+    """targets may specify a single variable or dimension name, or may not be given at all"""
     if targets is not None:
         if targets in ["lat", "lon", "time"]:  # an expected dimension
             return {"target": targets}
@@ -108,6 +109,26 @@ def check_targets_dds(targets, args):
             raise ValueError(f"Invalid target for DDS request: {targets}")
     else:
         return {}
+
+
+def check_targets_ascii(targets):
+    """targets must specify one or more dimension variables: lat, lon, or time"""
+    # it is legal under openDAP to download the entire file as ASCII,
+    # but we don't currently allow that, as THREDDS cannot server large ASCII files.
+    if targets is None:
+        raise ValueError(
+            "Missing target for ASCII request, please specify dimension variables"
+        )
+    elif targets in ["lat", "lon", "time"]:  # an expected dimension
+        return {"target": targets}
+    elif "," in targets:  # multiple dimensions
+        targets = targets.split(",")
+        for t in targets:
+            if t not in ["lat", "lon", "time"]:
+                raise ValueError(f"Invalid dimension for ASCII request: {t}")
+        return {"target": targets}
+    else:
+        raise ValueError(f"Invalid target for ASCII request: {targets}")
 
 
 def check_ranges(args):

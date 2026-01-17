@@ -4,6 +4,7 @@ from ncpartitioner.sanitize import (
     check_targets_partition,
     check_targets_dds,
     check_ranges,
+    check_targets_ascii,
 )
 from ncpartitioner.response import partition, dds, das
 import logging
@@ -43,3 +44,6 @@ def ncpartitioner():
             f"Received partition request: filepath={filepath}, targets={targets}"
         )
         return partition(args)
+    elif args["request_format"] in ["ascii", "asc"]:
+        args.update(check_targets_ascii(targets))
+        return ascii(args)

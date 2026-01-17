@@ -67,3 +67,14 @@ def das(args):
     logger.info(f"Received DAS request: filepath={filepath}")
 
     return redirect(f"{filepath}.das")
+
+
+def ascii(args):
+    # returns requested dimension data in ASCCII format; this function does not return gridded data.
+    filepath = dap_filepath(args)
+    dims = (
+        args["target"] if isinstance(args["target"], str) else ",".join(args["target"])
+    )
+    logger.info(f"Received ASCII request: filepath={filepath}")
+
+    return redirect(f"{filepath}.ascii?{dims}")
