@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y \
 COPY . /app
 WORKDIR /app
 
-RUN curl -sSL https://install.python-poetry.org | python3 -
+RUN pip install poetry==2.2
 ENV PATH="/root/.local/bin:$PATH"
 RUN poetry install
 
