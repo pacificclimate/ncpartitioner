@@ -22,7 +22,7 @@ def check_filepath(filepath):
     # remaining filepath must end with .nc
 
     # Flask strips the leading slash from the filepath argument, so we strip it here (and add it later)
-    data_root = os.getenv("DATA_ROOT".lstrip("/"), "storage/")
+    data_root = os.getenv("DATA_ROOT", "storage/").lstrip("/")
     if not filepath.startswith(data_root):
         raise ValueError(f"Invalid filepath: must start with {data_root} : {filepath}")
     # reamining filepath may end in .nc, or may be missing an extension, but must not have any
@@ -88,27 +88,26 @@ def check_targets_slice(targets):
 
 def check_targets_dds(targets, args):
     """targets may specify a single variable or dimension name, or may not be given at all"""
-    if targets is not None:
-        if targets in ["lat", "lon", "time"]:  # an expected dimension
-            return {"target": targets}
-        elif re.match(r"^[a-zA-Z0-9_]+$", targets):  # a possible variable name
-            # see if variable exists in file
-            metadata = subprocess.check_output(
-                [
-                    "ncks",
-                    "-m",
-                    f"/{args['dirname']}/{args['basename']}.{args['extension']}",
-                ]
-            ).decode("utf-8")
-            varreg = re.search(rf"{targets}\((.+),(.+),(.+)\)", metadata)
-            if varreg:
-                return {"target": targets}
-            else:
-                raise ValueError(f"Variable {targets} not found in file")
-        else:
-            raise ValueError(f"Invalid target for DDS request: {targets}")
-    else:
+    if targets is None:
         return {}
+    if targets in ["lat", "lon", "time"]:  # an expected dimension
+        return {"target": targets}
+    elif re.match(r"^[a-zA-Z0-9_]+$", targets):  # a possible variable name
+        # see if variable exists in file
+        metadata = subprocess.check_output(
+            [
+                "ncks",
+                "-m",
+                f"/{args['dirname']}/{args['basename']}.{args['extension']}",
+            ]
+        ).decode("utf-8")
+        varreg = re.search(rf"{targets}\((.+),(.+),(.+)\)", metadata)
+        if varreg:
+            return {"target": targets}
+        else:
+            raise ValueError(f"Variable {targets} not found in file")
+    else:
+        raise ValueError(f"Invalid target for DDS request: {targets}")
 
 
 def check_targets_ascii(targets):
