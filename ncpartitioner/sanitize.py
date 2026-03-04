@@ -23,7 +23,7 @@ def check_filepath(filepath):
 
     # Flask strips the leading slash from the filepath argument, so we strip it here (and add it later)
     data_root = os.getenv("DATA_ROOT", "storage/").lstrip("/")
-    if not filepath.startswith(data_root):
+    if not filepath.lstrip("/").startswith(data_root):
         raise ValueError(f"Invalid filepath: must start with {data_root} : {filepath}")
     # reamining filepath may end in .nc, or may be missing an extension, but must not have any
     # other extension.

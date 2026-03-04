@@ -16,25 +16,29 @@ def slice(args):
     thredds_base = os.getenv("THREDDS_HTTP_BASE")
 
     logger.info(f"Slicing file")
-    subprocess.run(
-        [
-            "ncks",
-            "-v",
-            f"{args['variable']}",
-            "-d",
-            f"time,{args['time'][0]},{args['time'][1]}",
-            "-d",
-            f"lat,{args['lat'][0]},{args['lat'][1]}",
-            "-d",
-            f"lon,{args['lon'][0]},{args['lon'][1]}",
-            f"/{args['dirname']}/{args['basename']}.{args['extension']}",
-            os.path.join(
-                output_dir,
-                f"{args['basename']}_{args['timestamp']}.{args['extension']}",
-            ),
-        ],
-        check=True,
-    )
+    try:
+        subprocess.run(
+            [
+                "ncks",
+                "-v",
+                f"{args['variable']}",
+                "-d",
+                f"time,{args['time'][0]},{args['time'][1]}",
+                "-d",
+                f"lat,{args['lat'][0]},{args['lat'][1]}",
+                "-d",
+                f"lon,{args['lon'][0]},{args['lon'][1]}",
+                f"/{args['dirname']}/{args['basename']}.{args['extension']}",
+                os.path.join(
+                    output_dir,
+                    f"{args['basename']}_{args['timestamp']}.{args['extension']}",
+                ),
+            ],
+            check=True,
+        )
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Error slicing file: {e}")
+        raise RuntimeError(f"Error slicing file: {e}")
 
     output_filename = f"{args['basename']}_{args['timestamp']}.{args['extension']}"
     logger.info(

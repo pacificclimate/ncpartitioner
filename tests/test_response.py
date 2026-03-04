@@ -28,6 +28,22 @@ def test_das():
     )
 
 
+def test_slice_error():
+    # test that invalid targets raise an error
+    args = {
+        "time": (0, 10),
+        "lat": (0, 10),
+        "lon": (0, 10),
+        "variable": "tasmax",
+        "timestamp": 1234567890,
+        "dirname": "tests/data",
+        "basename": "tasmin",
+        "extension": "nc",
+    }
+    with pytest.raises(RuntimeError):
+        slice(args)
+
+
 @pytest.mark.parametrize(
     "targets,timestamp",
     [
