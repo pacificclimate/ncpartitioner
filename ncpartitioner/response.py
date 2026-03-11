@@ -20,7 +20,7 @@ def slice(args):
         subprocess.run(
             [
                 "ncks",
-                "--cnk_plc=g3d",
+                "--cnk_plc=all",
                 "-v",
                 f"{args['variable']}",
                 "-d",
