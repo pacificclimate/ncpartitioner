@@ -21,7 +21,7 @@ def slice(args):
             [
                 "ncks",
                 "--cnk_plc=all",
-                "--cnk_dmn=time,10",
+                "--cnk_dmn=time,1",
                 "-v",
                 f"{args['variable']}",
                 "-d",
