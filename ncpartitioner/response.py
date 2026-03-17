@@ -17,26 +17,6 @@ def input_filepath(args):
     return f"/{args['dirname']}/{args['basename']}.{args['extension']}"
 
 
-def output_format_flag(filepath):
-    """Select an ncks output format flag that matches the input NetCDF format."""
-    input_format = subprocess.check_output(
-        ["ncdump", "-k", filepath], text=True
-    ).strip()
-
-    format_flags = {
-        "classic": "-3",
-        "64-bit offset": "-6",
-        "cdf5": "-5",
-        "netCDF-4 classic model": "-7",
-        "netCDF-4": "-4",
-    }
-
-    try:
-        return format_flags[input_format]
-    except KeyError as exc:
-        raise RuntimeError(f"Unsupported netCDF format: {input_format}") from exc
-
-
 def slice(args):
     output_dir = os.getenv("OUTPUT_DIR")
     thredds_base = os.getenv("THREDDS_HTTP_BASE")
@@ -44,11 +24,10 @@ def slice(args):
 
     logger.info(f"Slicing file")
     try:
-        format_flag = output_format_flag(source_filepath)
         subprocess.run(
             [
                 "ncks",
-                format_flag,
+                "-4",
                 "-v",
                 f"{args['variable']}",
                 "-d",
