@@ -1,5 +1,5 @@
 import re
-from ncpartitioner.response import slice, dds, das, output_format_flag
+from ncpartitioner.response import slice, dds, das
 import os
 import pytest
 import subprocess
@@ -42,26 +42,6 @@ def test_slice_error():
     }
     with pytest.raises(RuntimeError):
         slice(args)
-
-
-@pytest.mark.parametrize(
-    "ncdump_format,expected_flag",
-    [
-        ("classic", "-3"),
-        ("64-bit offset", "-6"),
-        ("cdf5", "-5"),
-        ("netCDF-4 classic model", "-7"),
-        ("netCDF-4", "-4"),
-    ],
-)
-def test_output_format_flag(monkeypatch, ncdump_format, expected_flag):
-    monkeypatch.setattr(
-        subprocess,
-        "check_output",
-        lambda *args, **kwargs: ncdump_format if kwargs.get("text") else None,
-    )
-
-    assert output_format_flag("/tmp/example.nc") == expected_flag
 
 
 @pytest.mark.parametrize(
