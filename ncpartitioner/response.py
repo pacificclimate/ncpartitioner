@@ -20,11 +20,11 @@ def slice(args):
         subprocess.run(
             [
                 "ncks",
-                "--cnk_csh=100000000",
+                #                "--cnk_csh=100000000",
                 "-v",
                 f"{args['variable']}",
                 "-d",
-                f"time,{args['time'][0]},{args['time'][1]}",
+                f"time,{args['time'][0]},{args['time'][1]},1",
                 "-d",
                 f"lat,{args['lat'][0]},{args['lat'][1]}",
                 "-d",
