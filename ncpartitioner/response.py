@@ -41,7 +41,7 @@ def slice(args):
     output_filename = f"{args['basename']}_{args['timestamp']}.{args['extension']}"
 
     logger.info(
-        f"Slicing file into {num_chunks} subfiles of approximately {t_per_chunk} timesteps each"
+        f"Slicing request into {num_chunks} subfiles of approximately {t_per_chunk} timesteps each"
     )
 
     # create component files with ncks
@@ -51,9 +51,12 @@ def slice(args):
             args["time"][1],
             args["time"][0] + (i + 1) * t_per_chunk - 1,
         )
+        chunk_filename = (
+            f"{args['basename']}_{args['timestamp']}_chunk{i + 1}.{args['extension']}"
+        )
 
         logger.info(
-            f"Slicing chunk {i + 1}/{num_chunks}: time[{chunk_start}:{chunk_end}]"
+            f"Slicing chunk {i + 1}/{num_chunks}: time[{chunk_start}:{chunk_end}] into {chunk_filename}"
         )
 
         try:
@@ -71,7 +74,7 @@ def slice(args):
                     f"/{args['dirname']}/{args['basename']}.{args['extension']}",
                     os.path.join(
                         output_dir,
-                        f"{args['basename']}_{args['timestamp']}_chunk{i + 1}.{args['extension']}",
+                        chunk_filename,
                     ),
                 ],
                 check=True,
@@ -87,10 +90,10 @@ def slice(args):
             ncrcar_command = (
                 ["ncrcat"]
                 + [
-                    f"{args['basename']}_{args['timestamp']}_chunk{i + 1}.{args['extension']}"
+                    f"{output_dir}/{args['basename']}_{args['timestamp']}_chunk{i + 1}.{args['extension']}"
                     for i in range(num_chunks)
                 ]
-                + [output_filename]
+                + [f"{output_dir}/{output_filename}"]
             )
             subprocess.run(ncrcar_command, check=True)
         except subprocess.CalledProcessError as e:

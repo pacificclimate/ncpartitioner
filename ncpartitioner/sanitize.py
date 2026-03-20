@@ -113,7 +113,7 @@ def check_targets_dds(targets, args):
 def check_targets_ascii(targets):
     """targets must specify one or more dimension variables: lat, lon, or time"""
     # it is legal under openDAP to download the entire file as ASCII,
-    # but we don't currently allow that, as THREDDS cannot server large ASCII files.
+    # but we don't currently allow that, as THREDDS cannot serve large ASCII files.
     if targets is None:
         raise ValueError(
             "Missing target for ASCII request, please specify dimension variables"
