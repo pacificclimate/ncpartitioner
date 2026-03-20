@@ -71,7 +71,7 @@ def slice(args):
                     f"/{args['dirname']}/{args['basename']}.{args['extension']}",
                     os.path.join(
                         output_dir,
-                        f"{args['basename']}_chunk{i + 1}.{args['extension']}",
+                        f"{args['basename']}_{args['timestamp']}_chunk{i + 1}.{args['extension']}",
                     ),
                 ],
                 check=True,
@@ -88,7 +88,8 @@ def slice(args):
                 [
                     "ncrcat",
                     os.path.join(
-                        output_dir, f"{args['basename']}_chunk*.{args['extension']}"
+                        output_dir,
+                        f"{args['basename']}_{args['timestamp']}_chunk*.{args['extension']}",
                     ),
                     os.path.join(
                         output_dir,
@@ -106,7 +107,7 @@ def slice(args):
                 os.remove(
                     os.path.join(
                         output_dir,
-                        f"{args['basename']}_chunk{i + 1}.{args['extension']}",
+                        f"{args['basename']}_{args['timestamp']}_chunk{i + 1}.{args['extension']}",
                     )
                 )
     else:  # rename single chunk file
