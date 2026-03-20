@@ -84,20 +84,15 @@ def slice(args):
     if num_chunks > 1:
         logger.info(f"Combining {num_chunks} subfiles into final output file")
         try:
-            subprocess.run(
-                [
-                    "ncrcat",
-                    os.path.join(
-                        output_dir,
-                        f"{args['basename']}_{args['timestamp']}_chunk*.{args['extension']}",
-                    ),
-                    os.path.join(
-                        output_dir,
-                        output_filename,
-                    ),
-                ],
-                check=True,
+            ncrcar_command = (
+                ["ncrcat"]
+                + [
+                    f"{args['basename']}_{args['timestamp']}_chunk{i + 1}.{args['extension']}"
+                    for i in range(num_chunks)
+                ]
+                + [output_filename]
             )
+            subprocess.run(ncrcar_command, check=True)
         except subprocess.CalledProcessError as e:
             logger.error(f"Error combining chunks: {e}")
             raise RuntimeError(f"Error combining chunks: {e}")
@@ -112,7 +107,10 @@ def slice(args):
                 )
     else:  # rename single chunk file
         os.rename(
-            os.path.join(output_dir, f"{args['basename']}_chunk1.{args['extension']}"),
+            os.path.join(
+                output_dir,
+                f"{args['basename']}_{args['timestamp']}_chunk1.{args['extension']}",
+            ),
             os.path.join(
                 output_dir,
                 output_filename,
