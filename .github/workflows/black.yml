@@ -16,4 +16,4 @@ jobs:
       - uses: psf/black@35ea67920b7f6ac8e09be1c47278752b1e827f76 # stable
         with:
           options: "--check"
-          use_pyproject: true
+          version: "25.9.0"
