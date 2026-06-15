@@ -66,14 +66,12 @@ def test_slice_error():
     ],
 )
 def test_slice(targets, timestamp):
-    args.update(targets)
-
-    args["timestamp"] = timestamp
-    filepath = os.path.abspath("tests/data/")
-    args["filepath"] = filepath
+    request_args = dict(args)
+    request_args.update(targets)
+    request_args["timestamp"] = timestamp
 
     # check that redirection looks correct
-    response = slice(args)
+    response = slice(request_args)
     assert response.status_code == 302
     expected_location = f"{os.getenv('THREDDS_HTTP_BASE')}{os.getenv('OUTPUT_DIR')}/tasmax_{timestamp}.nc"
     assert response.location == expected_location
@@ -86,7 +84,7 @@ def test_slice(targets, timestamp):
     metadata = subprocess.check_output(["ncks", "-m", outfile]).decode("utf-8")
 
     # make sure file contains requested variable
-    varreg = re.search(rf"{args['variable']}\((.+),(.+),(.+)\)", metadata)
+    varreg = re.search(rf"{request_args['variable']}\((.+),(.+),(.+)\)", metadata)
     assert varreg is not None
 
     # make sure dimensions match requested ranges
@@ -101,7 +99,7 @@ def test_slice(targets, timestamp):
             )
             if dimreg:
                 dim_size = int(dimreg.group(1))
-        assert dim_size == args[dim][1] - args[dim][0] + 1
+        assert dim_size == request_args[dim][1] - request_args[dim][0] + 1
 
     # clean up created file
     os.remove(os.path.join(os.getenv("OUTPUT_DIR"), f"tasmax_{timestamp}.nc"))

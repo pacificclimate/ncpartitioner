@@ -12,9 +12,11 @@ logger = logging.getLogger(__name__)
 
 def input_filepath(args):
     """Resolve the source file path for the current request."""
-    if "filepath" in args:
-        return os.path.join(args["filepath"], f"{args['basename']}.{args['extension']}")
-    return f"/{args['dirname']}/{args['basename']}.{args['extension']}"
+    return os.path.join(
+        os.sep,
+        args["dirname"],
+        f"{args['basename']}.{args['extension']}",
+    )
 
 
 def slice(args):
