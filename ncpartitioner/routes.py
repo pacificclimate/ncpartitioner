@@ -1,4 +1,4 @@
-from flask import Blueprint, request, redirect
+from flask import Blueprint, request
 from ncpartitioner.sanitize import (
     check_filepath,
     check_targets_slice,
@@ -6,12 +6,18 @@ from ncpartitioner.sanitize import (
     check_ranges,
     check_targets_ascii,
 )
-from ncpartitioner.response import slice, dds, das, asc
+from ncpartitioner.response import slice, dds, das, asc, slice_status
 import logging
 
 logger = logging.getLogger(__name__)
 
 partition = Blueprint("partition", __name__, url_prefix="/partition")
+
+
+@partition.route("/status/<job_id>", methods=["GET"])
+def partition_status(job_id):
+    """Return the status of an asynchronous slice job."""
+    return slice_status(job_id)
 
 
 @partition.route("/", methods=["GET"])
