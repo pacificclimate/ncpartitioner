@@ -23,7 +23,9 @@ def wait_for_job_status(job_id, expected_status, timeout=10):
         if payload and payload["status"] == expected_status:
             return payload
         time.sleep(0.05)
-    raise AssertionError(f"Timed out waiting for job {job_id} to reach {expected_status}")
+    raise AssertionError(
+        f"Timed out waiting for job {job_id} to reach {expected_status}"
+    )
 
 
 def test_dds():
