@@ -144,69 +144,86 @@ def cleanup_job_temp_dir(job_id):
     shutil.rmtree(job_temp_dir(job_id), ignore_errors=True)
 
 
+def subprocess_error_message(exc):
+    error = getattr(exc, "stderr", None)
+    return error.strip() if error else str(exc)
+
+
+def fail_job(job_id, args, error, *, returncode=None):
+    """Mark a job as failed, preserving its original started_at if known,
+    and clean up any temp chunk files. Used for both per-step subprocess
+    failures and post-hoc validation failures (e.g. missing output file).
+    """
+    existing = read_job_status(job_id)
+    write_job_status(
+        job_id,
+        build_job_status(
+            job_id,
+            args,
+            "failed",
+            started_at=existing.get("started_at") if existing else None,
+            completed_at=utcnow_iso(),
+            error=error,
+            returncode=returncode,
+        ),
+    )
+    cleanup_job_temp_dir(job_id)
+
+
+# Sentinel distinguishing "step failed, job already marked failed" from a
+# real stderr string (which may be empty/None on a clean run).
+_STEP_FAILED = object()
+
+
+def run_subprocess_step(job_id, args, cmd):
+    """Run a single ncks/ncrcat step. Returns the stripped stderr output (or
+    None) on success. On failure, fails the job and returns the sentinel
+    _STEP_FAILED so callers can short-circuit without raising.
+    """
+    try:
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+        )
+    except (subprocess.CalledProcessError, OSError) as exc:
+        fail_job(
+            job_id,
+            args,
+            subprocess_error_message(exc),
+            returncode=getattr(exc, "returncode", None),
+        )
+        return _STEP_FAILED
+    return result.stderr.strip() if result.stderr else None
+
+
 def execute_slice_job(job_id, args):
     source_filepath = input_filepath(args)
     chunk_paths = []
     stderr_messages = []
 
-    try:
-        for index, (time_start, time_end) in enumerate(time_windows(args)):
-            chunk_path = chunk_output_filepath(job_id, index)
-            chunk_paths.append(chunk_path)
-            result = subprocess.run(
-                slice_command(args, source_filepath, chunk_path, time_start, time_end),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=True,
-            )
-            if result.stderr:
-                stderr_messages.append(result.stderr.strip())
-    except (subprocess.CalledProcessError, OSError) as exc:
-        error = getattr(exc, "stderr", None)
-        error = error.strip() if error else str(exc)
-        write_job_status(
+    for index, (time_start, time_end) in enumerate(time_windows(args)):
+        chunk_path = chunk_output_filepath(job_id, index)
+        chunk_paths.append(chunk_path)
+        stderr = run_subprocess_step(
             job_id,
-            build_job_status(
-                job_id,
-                args,
-                "failed",
-                started_at=read_job_status(job_id).get("started_at") if read_job_status(job_id) else None,
-                completed_at=utcnow_iso(),
-                error=error,
-                returncode=getattr(exc, "returncode", None),
-            ),
+            args,
+            slice_command(args, source_filepath, chunk_path, time_start, time_end),
         )
-        cleanup_job_temp_dir(job_id)
-        return
+        if stderr is _STEP_FAILED:
+            return
+        if stderr:
+            stderr_messages.append(stderr)
 
     if len(chunk_paths) == 1:
         os.replace(chunk_paths[0], output_filepath(args))
     else:
-        try:
-            subprocess.run(
-                ["ncrcat", *chunk_paths, output_filepath(args)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=True,
-            )
-        except (subprocess.CalledProcessError, OSError) as exc:
-            error = getattr(exc, "stderr", None)
-            error = error.strip() if error else str(exc)
-            write_job_status(
-                job_id,
-                build_job_status(
-                    job_id,
-                    args,
-                    "failed",
-                    started_at=read_job_status(job_id).get("started_at") if read_job_status(job_id) else None,
-                    completed_at=utcnow_iso(),
-                    error=error,
-                    returncode=getattr(exc, "returncode", None),
-                ),
-            )
-            cleanup_job_temp_dir(job_id)
+        stderr = run_subprocess_step(
+            job_id, args, ["ncrcat", *chunk_paths, output_filepath(args)]
+        )
+        if stderr is _STEP_FAILED:
             return
 
     cleanup_job_temp_dir(job_id)
@@ -228,17 +245,8 @@ def execute_slice_job(job_id, args):
             ),
         )
         return
-    write_job_status(
-        job_id,
-        build_job_status(
-            job_id,
-            args,
-            "failed",
-            started_at=payload.get("started_at"),
-            completed_at=utcnow_iso(),
-            error="Slice job did not create an output file",
-        ),
-    )
+
+    fail_job(job_id, args, "Slice job did not create an output file")
 
 
 def slice(args):
