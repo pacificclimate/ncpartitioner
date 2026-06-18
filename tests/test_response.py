@@ -1,8 +1,12 @@
-import re
-from ncpartitioner.response import slice, dds, das
 import os
-import pytest
+import re
 import subprocess
+import time
+from unittest.mock import patch
+
+import pytest
+
+from ncpartitioner.response import execute_slice_job, read_job_status, slice, dds, das
 
 args = {
     "basename": "tasmax",
@@ -10,6 +14,16 @@ args = {
     "extension": "nc",
     "timestamp": 1234567890,
 }
+
+
+def wait_for_job_status(job_id, expected_status, timeout=10):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        payload = read_job_status(job_id)
+        if payload and payload["status"] == expected_status:
+            return payload
+        time.sleep(0.05)
+    raise AssertionError(f"Timed out waiting for job {job_id} to reach {expected_status}")
 
 
 def test_dds():
@@ -28,9 +42,9 @@ def test_das():
     )
 
 
-def test_slice_error():
-    # test that invalid targets raise an error
-    args = {
+def test_slice_error(tmp_path, monkeypatch):
+    monkeypatch.setenv("OUTPUT_DIR", str(tmp_path))
+    request_args = {
         "time": (0, 10),
         "lat": (0, 10),
         "lon": (0, 10),
@@ -40,8 +54,44 @@ def test_slice_error():
         "basename": "tasmin",
         "extension": "nc",
     }
-    with pytest.raises(RuntimeError):
-        slice(args)
+    with patch("ncpartitioner.response.subprocess.run", side_effect=OSError("boom")):
+        response = slice(request_args)
+
+    assert response.status_code == 202
+    payload = response.get_json()
+    failed = wait_for_job_status(payload["job_id"], "failed")
+    assert failed["error"] == "boom"
+
+
+def test_execute_slice_job_marks_failure(tmp_path, monkeypatch):
+    monkeypatch.setenv("OUTPUT_DIR", str(tmp_path))
+    request_args = {
+        "basename": "tasmax",
+        "dirname": "tests/data",
+        "extension": "nc",
+        "timestamp": 99,
+        "variable": "tasmax",
+        "time": (0, 1),
+        "lat": (0, 1),
+        "lon": (0, 1),
+    }
+    job_id = "failed-job"
+    status_path = os.path.join(str(tmp_path), ".jobs", f"{job_id}.json")
+    os.makedirs(os.path.dirname(status_path), exist_ok=True)
+    with open(status_path, "w", encoding="utf-8") as handle:
+        handle.write(
+            '{"job_id":"failed-job","status":"running","status_url":"/partition/status/failed-job","download_url":"x","output_filename":"y","started_at":"2026-01-01T00:00:00+00:00"}'
+        )
+
+    with patch(
+        "ncpartitioner.response.subprocess.run",
+        side_effect=subprocess.CalledProcessError(1, ["ncks"], stderr="broken"),
+    ):
+        execute_slice_job(job_id, request_args)
+
+    payload = read_job_status(job_id)
+    assert payload["status"] == "failed"
+    assert payload["error"] == "broken"
 
 
 @pytest.mark.parametrize(
@@ -65,22 +115,32 @@ def test_slice_error():
         ),
     ],
 )
-def test_slice(targets, timestamp):
+def test_slice(targets, timestamp, tmp_path, monkeypatch):
     request_args = dict(args)
     request_args.update(targets)
     request_args["timestamp"] = timestamp
+    monkeypatch.setenv("OUTPUT_DIR", str(tmp_path))
 
-    # check that redirection looks correct
-    response = slice(request_args)
-    assert response.status_code == 302
-    expected_location = f"{os.getenv('THREDDS_HTTP_BASE')}{os.getenv('OUTPUT_DIR')}/tasmax_{timestamp}.nc"
-    assert response.location == expected_location
-
-    # check that file was created and has expected variables and dimensions
-    outfile = os.path.join(
-        os.path.abspath(os.getenv("OUTPUT_DIR")), f"tasmax_{timestamp}.nc"
+    expected_location = (
+        f"{os.getenv('THREDDS_HTTP_BASE')}{tmp_path}/tasmax_{timestamp}.nc"
     )
+    response = slice(request_args)
+
+    assert response.status_code == 202
+    assert response.location == expected_location
+    payload = response.get_json()
+    assert payload["status"] == "accepted"
+    assert payload["job_id"]
+    assert payload["status_url"] == f"/partition/status/{payload['job_id']}"
+    assert payload["download_url"] == expected_location
+    assert payload["output_filename"] == f"tasmax_{timestamp}.nc"
+
+    outfile = os.path.join(str(tmp_path), f"tasmax_{timestamp}.nc")
+    status_payload = wait_for_job_status(payload["job_id"], "complete")
+    assert status_payload["download_url"] == expected_location
+    assert status_payload["output_filename"] == f"tasmax_{timestamp}.nc"
     assert os.path.isfile(outfile)
+
     metadata = subprocess.check_output(["ncks", "-m", outfile]).decode("utf-8")
 
     # make sure file contains requested variable
@@ -101,5 +161,4 @@ def test_slice(targets, timestamp):
                 dim_size = int(dimreg.group(1))
         assert dim_size == request_args[dim][1] - request_args[dim][0] + 1
 
-    # clean up created file
-    os.remove(os.path.join(os.getenv("OUTPUT_DIR"), f"tasmax_{timestamp}.nc"))
+    os.remove(outfile)
