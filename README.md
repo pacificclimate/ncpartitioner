@@ -80,7 +80,7 @@ Chunking notes:
 
 * Large requests are split into multiple time windows based on `NCPARTITIONER_CHUNK_BYTES`
 * Chunk extraction runs in parallel up to `NCPARTITIONER_MAX_WORKERS`
-* Completed chunks are merged incrementally in time order, so the service does not wait for every chunk before beginning output assembly
+* Completed chunks are written to temporary files and concatenated in time order once chunk extraction finishes
 * `NCPARTITIONER_CHUNK_BYTES` is a per-chunk target, not a per-time-index target
 * Approximate in-flight slice memory is `NCPARTITIONER_CHUNK_BYTES * NCPARTITIONER_MAX_WORKERS`, plus process and netCDF/NCO overhead
 * The chunk planner currently estimates bytes from `lat * lon * 4`, so real memory usage can be higher for larger datatypes such as `Float64`

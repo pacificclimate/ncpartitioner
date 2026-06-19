@@ -142,10 +142,6 @@ def chunk_output_filepath(job_id, index):
     return os.path.join(job_temp_dir(job_id), f"chunk_{index:04d}.nc")
 
 
-def merge_output_filepath(job_id):
-    return os.path.join(job_temp_dir(job_id), "merged.nc")
-
-
 def deflate_level():
     return int(os.getenv("NCPARTITIONER_DEFLATE_LEVEL", 1))
 
@@ -243,7 +239,6 @@ def execute_slice_job(job_id, args):
     workers = max_workers(len(windows))
     lookahead = workers
     completed_chunks, in_flight = {}, {}
-    next_to_append = 0
     next_to_submit = 0
     stderr_messages = []
 
@@ -256,35 +251,13 @@ def execute_slice_job(job_id, args):
         )
         return index, chunk_path, stderr
 
-    def append_ready_chunks():
-        nonlocal next_to_append
-        while next_to_append in completed_chunks:
-            chunk_path = completed_chunks.pop(next_to_append)
-            if next_to_append == 0:
-                os.replace(chunk_path, final_path)
-            else:
-                merged_path = merge_output_filepath(job_id)
-                stderr = run_subprocess_step(
-                    job_id,
-                    args,
-                    ["ncrcat", final_path, chunk_path, merged_path],
-                )
-                if stderr is _STEP_FAILED:
-                    return _STEP_FAILED
-                if stderr:
-                    stderr_messages.append(stderr)
-                os.replace(merged_path, final_path)
-                os.remove(chunk_path)
-            next_to_append += 1
-        return None
-
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
 
         def submit_more():
             nonlocal next_to_submit
             while (
                 next_to_submit < len(windows)
-                and next_to_submit - next_to_append < workers + lookahead
+                and next_to_submit - len(completed_chunks) < workers + lookahead
             ):
                 time_start, time_end = windows[next_to_submit]
                 future = pool.submit(slice_one, next_to_submit, time_start, time_end)
@@ -305,10 +278,19 @@ def execute_slice_job(job_id, args):
                     stderr_messages.append(stderr)
                 completed_chunks[index] = chunk_path
 
-            append_result = append_ready_chunks()
-            if append_result is _STEP_FAILED:
-                return
             submit_more()
+
+    ordered_chunk_paths = [completed_chunks[index] for index in range(len(windows))]
+    if len(ordered_chunk_paths) == 1:
+        os.replace(ordered_chunk_paths[0], final_path)
+    else:
+        stderr = run_subprocess_step(
+            job_id, args, ["ncrcat", *ordered_chunk_paths, final_path]
+        )
+        if stderr is _STEP_FAILED:
+            return
+        if stderr:
+            stderr_messages.append(stderr)
 
     cleanup_job_temp_dir(job_id)
     payload = read_job_status(job_id)
@@ -316,7 +298,7 @@ def execute_slice_job(job_id, args):
         logger.warning("Slice job %s lost its status record", job_id)
         return
 
-    if next_to_append == len(windows) and os.path.isfile(final_path):
+    if len(completed_chunks) == len(windows) and os.path.isfile(final_path):
         write_job_status(
             job_id,
             build_job_status(
