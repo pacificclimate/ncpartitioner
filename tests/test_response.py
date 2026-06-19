@@ -6,7 +6,14 @@ from unittest.mock import patch
 
 import pytest
 
-from ncpartitioner.response import execute_slice_job, read_job_status, slice, dds, das
+from ncpartitioner.response import (
+    execute_slice_job,
+    read_job_status,
+    slice,
+    dds,
+    das,
+    time_windows,
+)
 
 args = {
     "basename": "tasmax",
@@ -16,15 +23,25 @@ args = {
 }
 
 
+def run_job_inline(job_id, args):
+    execute_slice_job(job_id, args)
+    return None
+
+
 def wait_for_job_status(job_id, expected_status, timeout=10):
     deadline = time.time() + timeout
     while time.time() < deadline:
         payload = read_job_status(job_id)
-        if payload and payload["status"] == expected_status:
-            return payload
+        if payload:
+            if payload["status"] == expected_status:
+                return payload
+            if payload["status"] == "failed":
+                raise AssertionError(
+                    f"Job {job_id} failed while waiting for {expected_status}: {payload}"
+                )
         time.sleep(0.05)
     raise AssertionError(
-        f"Timed out waiting for job {job_id} to reach {expected_status}"
+        f"Timed out waiting for job {job_id} to reach {expected_status}; last payload={read_job_status(job_id)}"
     )
 
 
@@ -56,8 +73,11 @@ def test_slice_error(tmp_path, monkeypatch):
         "basename": "tasmin",
         "extension": "nc",
     }
-    with patch("ncpartitioner.response.subprocess.run", side_effect=OSError("boom")):
-        response = slice(request_args)
+    with patch("ncpartitioner.response.start_slice_job", side_effect=run_job_inline):
+        with patch(
+            "ncpartitioner.response.subprocess.run", side_effect=OSError("boom")
+        ):
+            response = slice(request_args)
 
     assert response.status_code == 202
     payload = response.get_json()
@@ -96,6 +116,19 @@ def test_execute_slice_job_marks_failure(tmp_path, monkeypatch):
     assert payload["error"] == "broken"
 
 
+def test_time_windows_uses_byte_budget(monkeypatch):
+    monkeypatch.setenv("NCPARTITIONER_CHUNK_BYTES", "64")
+    request_args = {
+        "time": (0, 10),
+        "lat": (0, 1),
+        "lon": (0, 3),
+    }
+
+    windows = time_windows(request_args)
+
+    assert windows == [(0, 1), (2, 3), (4, 5), (6, 7), (8, 9), (10, 10)]
+
+
 @pytest.mark.parametrize(
     "targets,timestamp",
     [
@@ -122,11 +155,16 @@ def test_slice(targets, timestamp, tmp_path, monkeypatch):
     request_args.update(targets)
     request_args["timestamp"] = timestamp
     monkeypatch.setenv("OUTPUT_DIR", str(tmp_path))
+    # Force a small chunk budget so these cases actually exercise multiple
+    # parallel chunks plus a real final ncrcat merge, not just the
+    # single-chunk rename shortcut.
+    monkeypatch.setenv("NCPARTITIONER_CHUNK_BYTES", "64")
 
     expected_location = (
         f"{os.getenv('THREDDS_HTTP_BASE')}{tmp_path}/tasmax_{timestamp}.nc"
     )
-    response = slice(request_args)
+    with patch("ncpartitioner.response.start_slice_job", side_effect=run_job_inline):
+        response = slice(request_args)
 
     assert response.status_code == 202
     assert response.location == expected_location
@@ -139,9 +177,14 @@ def test_slice(targets, timestamp, tmp_path, monkeypatch):
 
     outfile = os.path.join(str(tmp_path), f"tasmax_{timestamp}.nc")
     status_payload = wait_for_job_status(payload["job_id"], "complete")
+    assert status_payload["status_url"] == f"partition/status/{payload['job_id']}"
     assert status_payload["download_url"] == expected_location
     assert status_payload["output_filename"] == f"tasmax_{timestamp}.nc"
     assert os.path.isfile(outfile)
+
+    # temp chunk dir should be fully cleaned up after a successful job
+    job_temp_dir = os.path.join(str(tmp_path), ".jobs", payload["job_id"])
+    assert not os.path.isdir(job_temp_dir)
 
     metadata = subprocess.check_output(["ncks", "-m", outfile]).decode("utf-8")
 

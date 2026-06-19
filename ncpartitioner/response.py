@@ -5,6 +5,7 @@ run asynchronously and publish job status through local metadata stored under
 OUTPUT_DIR/.jobs.
 """
 
+import concurrent.futures
 import json
 import logging
 import os
@@ -19,7 +20,8 @@ from flask import Response, redirect
 logger = logging.getLogger(__name__)
 
 TERMINAL_JOB_STATUSES = {"complete", "failed"}
-DEFAULT_TIME_WINDOW_SIZE = 10
+_job_locks = {}
+_job_locks_guard = threading.Lock()
 
 
 def input_filepath(args):
@@ -69,6 +71,15 @@ def ensure_job_temp_dir(job_id):
     os.makedirs(job_temp_dir(job_id), exist_ok=True)
 
 
+def job_lock(job_id):
+    with _job_locks_guard:
+        lock = _job_locks.get(job_id)
+        if lock is None:
+            lock = threading.Lock()
+            _job_locks[job_id] = lock
+        return lock
+
+
 def build_job_status(job_id, args, status, **extra):
     payload = {
         "job_id": job_id,
@@ -84,10 +95,11 @@ def build_job_status(job_id, args, status, **extra):
 
 def write_job_status(job_id, payload):
     ensure_jobs_dir()
-    temp_path = f"{status_filepath(job_id)}.tmp"
-    with open(temp_path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle)
-    os.replace(temp_path, status_filepath(job_id))
+    with job_lock(job_id):
+        temp_path = f"{status_filepath(job_id)}.tmp"
+        with open(temp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+        os.replace(temp_path, status_filepath(job_id))
 
 
 def read_job_status(job_id):
@@ -106,27 +118,44 @@ def response_json(payload, status=200):
     return Response(json.dumps(payload), status=status, mimetype="application/json")
 
 
-def time_window_size():
-    return int(os.getenv("NCPARTITIONER_TIME_WINDOW_SIZE", DEFAULT_TIME_WINDOW_SIZE))
+# Target chunk size in bytes, used to size time windows so that a single
+# ncks slice has a roughly constant memory/IO footprint regardless of how
+# large a spatial subset the request covers.
+BYTES_PER_ELEMENT = 4  # adjust per dtype if you support more than float32
+
+
+def chunk_byte_budget():
+    return int(os.getenv("NCPARTITIONER_CHUNK_BYTES", 300 * 1024 * 1024))  # ~300MB
 
 
 def time_windows(args):
     start, end = args["time"]
-    window = max(1, time_window_size())
-    return [
-        (window_start, min(window_start + window - 1, end))
-        for window_start in range(start, end + 1, window)
-    ]
+    lat0, lat1 = args["lat"]
+    lon0, lon1 = args["lon"]
+    n_lat, n_lon = lat1 - lat0 + 1, lon1 - lon0 + 1
+    bytes_per_step = max(n_lat * n_lon * BYTES_PER_ELEMENT, 1)
+    window = max(1, chunk_byte_budget() // bytes_per_step)
+    return [(s, min(s + window - 1, end)) for s in range(start, end + 1, window)]
 
 
 def chunk_output_filepath(job_id, index):
     return os.path.join(job_temp_dir(job_id), f"chunk_{index:04d}.nc")
 
 
+def merge_output_filepath(job_id):
+    return os.path.join(job_temp_dir(job_id), "merged.nc")
+
+
+def deflate_level():
+    return int(os.getenv("NCPARTITIONER_DEFLATE_LEVEL", 1))
+
+
 def slice_command(args, source_filepath, destination, time_start, time_end):
     return [
         "ncks",
         "-4",
+        "-L",
+        str(deflate_level()),
         "-v",
         f"{args['variable']}",
         "-d",
@@ -199,32 +228,87 @@ def run_subprocess_step(job_id, args, cmd):
     return result.stderr.strip() if result.stderr else None
 
 
+DEFAULT_MAX_WORKERS = 3
+
+
+def max_workers(num_windows):
+    configured = int(os.getenv("NCPARTITIONER_MAX_WORKERS", DEFAULT_MAX_WORKERS))
+    return max(1, min(configured, num_windows))
+
+
 def execute_slice_job(job_id, args):
     source_filepath = input_filepath(args)
-    chunk_paths = []
+    windows = time_windows(args)
+    final_path = output_filepath(args)
+    workers = max_workers(len(windows))
+    lookahead = workers
+    completed_chunks, in_flight = {}, {}
+    next_to_append = 0
+    next_to_submit = 0
     stderr_messages = []
 
-    for index, (time_start, time_end) in enumerate(time_windows(args)):
+    def slice_one(index, time_start, time_end):
         chunk_path = chunk_output_filepath(job_id, index)
-        chunk_paths.append(chunk_path)
         stderr = run_subprocess_step(
             job_id,
             args,
             slice_command(args, source_filepath, chunk_path, time_start, time_end),
         )
-        if stderr is _STEP_FAILED:
-            return
-        if stderr:
-            stderr_messages.append(stderr)
+        return index, chunk_path, stderr
 
-    if len(chunk_paths) == 1:
-        os.replace(chunk_paths[0], output_filepath(args))
-    else:
-        stderr = run_subprocess_step(
-            job_id, args, ["ncrcat", *chunk_paths, output_filepath(args)]
-        )
-        if stderr is _STEP_FAILED:
-            return
+    def append_ready_chunks():
+        nonlocal next_to_append
+        while next_to_append in completed_chunks:
+            chunk_path = completed_chunks.pop(next_to_append)
+            if next_to_append == 0:
+                os.replace(chunk_path, final_path)
+            else:
+                merged_path = merge_output_filepath(job_id)
+                stderr = run_subprocess_step(
+                    job_id,
+                    args,
+                    ["ncrcat", final_path, chunk_path, merged_path],
+                )
+                if stderr is _STEP_FAILED:
+                    return _STEP_FAILED
+                if stderr:
+                    stderr_messages.append(stderr)
+                os.replace(merged_path, final_path)
+                os.remove(chunk_path)
+            next_to_append += 1
+        return None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+
+        def submit_more():
+            nonlocal next_to_submit
+            while (
+                next_to_submit < len(windows)
+                and next_to_submit - next_to_append < workers + lookahead
+            ):
+                time_start, time_end = windows[next_to_submit]
+                future = pool.submit(slice_one, next_to_submit, time_start, time_end)
+                in_flight[future] = next_to_submit
+                next_to_submit += 1
+
+        submit_more()
+        while in_flight:
+            done, _ = concurrent.futures.wait(
+                in_flight, return_when=concurrent.futures.FIRST_COMPLETED
+            )
+            for future in done:
+                in_flight.pop(future)
+                index, chunk_path, stderr = future.result()
+                if stderr is _STEP_FAILED:
+                    return
+                if stderr:
+                    stderr_messages.append(stderr)
+                completed_chunks[index] = chunk_path
+
+            append_result = append_ready_chunks()
+            if append_result is _STEP_FAILED:
+                return
+            submit_more()
 
     cleanup_job_temp_dir(job_id)
     payload = read_job_status(job_id)
@@ -232,7 +316,7 @@ def execute_slice_job(job_id, args):
         logger.warning("Slice job %s lost its status record", job_id)
         return
 
-    if os.path.isfile(output_filepath(args)):
+    if next_to_append == len(windows) and os.path.isfile(final_path):
         write_job_status(
             job_id,
             build_job_status(
@@ -249,6 +333,16 @@ def execute_slice_job(job_id, args):
     fail_job(job_id, args, "Slice job did not create an output file")
 
 
+def start_slice_job(job_id, args):
+    thread = threading.Thread(
+        target=execute_slice_job,
+        args=(job_id, args),
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
 def slice(args):
     job_id = uuid.uuid4().hex
     ensure_job_temp_dir(job_id)
@@ -262,11 +356,7 @@ def slice(args):
     )
     write_job_status(job_id, payload)
 
-    threading.Thread(
-        target=execute_slice_job,
-        args=(job_id, args),
-        daemon=True,
-    ).start()
+    start_slice_job(job_id, args)
 
     logger.info(
         "Background slice job started for %s -> %s (job_id=%s)",

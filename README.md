@@ -18,6 +18,9 @@ To do end-to-end testing, you will also need a THREDDS instance running on your 
 * `THREDDS_HTTP_BASE` - the base URL for the THREDDS http server (probably ends /fileserver); a user will be redirected to download the completed file
 * `THREDDS_DAP_BASE` - the base URL for the THREDDS openDAP server (probably ends /dodsC): used to fulfill metadata requests
 * `DATA_ROOT` - directory under which all data is found; prevents files outside the directory from being served
+* `NCPARTITIONER_CHUNK_BYTES` - optional target size, in bytes, for each time-window slice job; defaults to `314572800` (300 MiB). Smaller values reduce per-`ncks` memory pressure but create more chunks.
+* `NCPARTITIONER_MAX_WORKERS` - optional maximum number of chunk extraction workers; defaults to `3`. Increase cautiously because each worker runs its own `ncks` process.
+* `NCPARTITIONER_DEFLATE_LEVEL` - optional netCDF4 compression level passed to `ncks -L`; defaults to `1`
 
 Run with flask:
 ```
@@ -57,4 +60,29 @@ Redirects to a THREDDS page displaying values for the requested dimension variab
 ### Partition request
 `https://server/partition/?filepath=path/to/file.nc.nc&targets=time[0:10],lat[0:20],lon[0:30],tasmax[0:10][0:20][0:30]`
 
-Creates a file with the requested dimensions using `ncks`, then redirects the user to the THREDDS page to download the newly created file. Note that the variable is always trimmed to the hyperslab specified in the dimensions portion of the `targets` attribute; if the variable portion of the `targets` attribute is different, it will be overruled.
+Starts an asynchronous slice job. The initial response is `202 Accepted` with a JSON body containing:
+
+* `status` - always `accepted` for the initial response
+* `job_id` - backend-generated identifier for the slice job
+* `status_url` - relative polling path in the form `partition/status/<job_id>`; intentionally no leading slash
+* `download_url` - final THREDDS download URL for the output file
+* `output_filename` - final output filename
+
+The frontend should poll `status_url` until it receives a terminal job state. Current job states are:
+
+* `running`
+* `complete`
+* `failed`
+
+Completed jobs keep the same `download_url` and `output_filename` values, so the frontend can start the download when status becomes `complete`.
+
+Chunking notes:
+
+* Large requests are split into multiple time windows based on `NCPARTITIONER_CHUNK_BYTES`
+* Chunk extraction runs in parallel up to `NCPARTITIONER_MAX_WORKERS`
+* Completed chunks are merged incrementally in time order, so the service does not wait for every chunk before beginning output assembly
+* `NCPARTITIONER_CHUNK_BYTES` is a per-chunk target, not a per-time-index target
+* Approximate in-flight slice memory is `NCPARTITIONER_CHUNK_BYTES * NCPARTITIONER_MAX_WORKERS`, plus process and netCDF/NCO overhead
+* The chunk planner currently estimates bytes from `lat * lon * 4`, so real memory usage can be higher for larger datatypes such as `Float64`
+
+Note that the variable is always trimmed to the hyperslab specified in the dimensions portion of the `targets` attribute; if the variable portion of the `targets` attribute is different, it will be overruled.
