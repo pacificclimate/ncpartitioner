@@ -99,7 +99,7 @@ def read_job_status(job_id):
 
 
 def status_url(job_id):
-    return f"/partition/status/{job_id}"
+    return f"partition/status/{job_id}"
 
 
 def response_json(payload, status=200):

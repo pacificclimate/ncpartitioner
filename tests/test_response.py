@@ -82,7 +82,7 @@ def test_execute_slice_job_marks_failure(tmp_path, monkeypatch):
     os.makedirs(os.path.dirname(status_path), exist_ok=True)
     with open(status_path, "w", encoding="utf-8") as handle:
         handle.write(
-            '{"job_id":"failed-job","status":"running","status_url":"/partition/status/failed-job","download_url":"x","output_filename":"y","started_at":"2026-01-01T00:00:00+00:00"}'
+            '{"job_id":"failed-job","status":"running","status_url":"partition/status/failed-job","download_url":"x","output_filename":"y","started_at":"2026-01-01T00:00:00+00:00"}'
         )
 
     with patch(
@@ -133,7 +133,7 @@ def test_slice(targets, timestamp, tmp_path, monkeypatch):
     payload = response.get_json()
     assert payload["status"] == "accepted"
     assert payload["job_id"]
-    assert payload["status_url"] == f"/partition/status/{payload['job_id']}"
+    assert payload["status_url"] == f"partition/status/{payload['job_id']}"
     assert payload["download_url"] == expected_location
     assert payload["output_filename"] == f"tasmax_{timestamp}.nc"
 

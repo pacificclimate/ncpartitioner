@@ -33,13 +33,13 @@ def test_partition_status_returns_job_state(tmp_path, monkeypatch):
         ),
     )
 
-    response = client.get(f"/partition/status/{job_id}")
+    response = client.get(f"partition/status/{job_id}")
 
     assert response.status_code == 200
     payload = response.get_json()
     assert payload["job_id"] == job_id
     assert payload["status"] == "complete"
-    assert payload["status_url"] == f"/partition/status/{job_id}"
+    assert payload["status_url"] == f"partition/status/{job_id}"
     assert payload["download_url"] == (
         f"http://thredds.test/fileserver{tmp_path}/tasmax_1234567890.nc"
     )
