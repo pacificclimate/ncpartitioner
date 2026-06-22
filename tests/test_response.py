@@ -25,7 +25,7 @@ args = {
 
 def run_job_inline(job_id, args):
     execute_slice_job(job_id, args)
-    return None
+    return 1
 
 
 def wait_for_job_status(job_id, expected_status, timeout=10):
@@ -73,7 +73,10 @@ def test_slice_error(tmp_path, monkeypatch):
         "basename": "tasmin",
         "extension": "nc",
     }
-    with patch("ncpartitioner.response.start_slice_job", side_effect=run_job_inline):
+    with patch(
+        "ncpartitioner.response.queue_client.enqueue_slice_job",
+        side_effect=run_job_inline,
+    ):
         with patch(
             "ncpartitioner.response.subprocess.run", side_effect=OSError("boom")
         ):
@@ -163,14 +166,18 @@ def test_slice(targets, timestamp, tmp_path, monkeypatch):
     expected_location = (
         f"{os.getenv('THREDDS_HTTP_BASE')}{tmp_path}/tasmax_{timestamp}.nc"
     )
-    with patch("ncpartitioner.response.start_slice_job", side_effect=run_job_inline):
+    with patch(
+        "ncpartitioner.response.queue_client.enqueue_slice_job",
+        side_effect=run_job_inline,
+    ):
         response = slice(request_args)
 
     assert response.status_code == 202
     assert response.location == expected_location
     payload = response.get_json()
-    assert payload["status"] == "accepted"
+    assert payload["status"] == "queued"
     assert payload["job_id"]
+    assert payload["queue_position"] == 1
     assert payload["status_url"] == f"partition/status/{payload['job_id']}"
     assert payload["download_url"] == expected_location
     assert payload["output_filename"] == f"tasmax_{timestamp}.nc"

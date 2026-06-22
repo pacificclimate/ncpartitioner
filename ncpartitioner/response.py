@@ -1,8 +1,10 @@
 """Send responses to user requests.
 
 DDS/DAS/ASCII requests redirect immediately to THREDDS. NetCDF slice requests
-run asynchronously and publish job status through local metadata stored under
-OUTPUT_DIR/.jobs.
+are enqueued onto a Dragonfly-backed queue and processed by a separate
+worker process (see worker.py). Job status is published through local
+metadata stored under OUTPUT_DIR/.jobs, same as before -- only how a job
+gets *started* has changed; execute_slice_job itself is unmodified.
 """
 
 import concurrent.futures
@@ -16,6 +18,8 @@ import uuid
 from datetime import datetime, timezone
 
 from flask import Response, redirect
+
+from . import queue_client
 
 logger = logging.getLogger(__name__)
 
@@ -233,6 +237,7 @@ def max_workers(num_windows):
 
 
 def execute_slice_job(job_id, args):
+    """Run one slice job, invoked by the worker process."""
     source_filepath = input_filepath(args)
     windows = time_windows(args)
     final_path = output_filepath(args)
@@ -315,41 +320,36 @@ def execute_slice_job(job_id, args):
     fail_job(job_id, args, "Slice job did not create an output file")
 
 
-def start_slice_job(job_id, args):
-    thread = threading.Thread(
-        target=execute_slice_job,
-        args=(job_id, args),
-        daemon=True,
-    )
-    thread.start()
-    return thread
-
-
 def slice(args):
+    """Enqueue a slice job onto the Dragonfly-backed queue and return 202
+    immediately with the job's queue position. A separate worker process
+    (worker.py) picks the job up and calls execute_slice_job.
+    """
     job_id = uuid.uuid4().hex
     ensure_job_temp_dir(job_id)
 
-    logger.info("Starting background slice job")
     payload = build_job_status(
         job_id,
         args,
-        "running",
-        started_at=utcnow_iso(),
+        "queued",
+        started_at=None,
     )
     write_job_status(job_id, payload)
 
-    start_slice_job(job_id, args)
-
+    position = queue_client.enqueue_slice_job(job_id, args)
     logger.info(
-        "Background slice job started for %s -> %s (job_id=%s)",
+        "Slice job queued for %s -> %s (job_id=%s, position=%s)",
         input_filepath(args),
         output_filepath(args),
         job_id,
+        position,
     )
+
     response = response_json(
         {
-            "status": "accepted",
+            "status": "queued",
             "job_id": job_id,
+            "queue_position": position,
             "status_url": status_url(job_id),
             "download_url": output_url(args),
             "output_filename": output_filename(args),
@@ -365,6 +365,15 @@ def slice_status(job_id):
     payload = read_job_status(job_id)
     if payload is None:
         return response_json({"status": "not_found", "job_id": job_id}, status=404)
+
+    if payload.get("status") == "queued":
+        position = queue_client.queue_position(job_id)
+        if position is not None:
+            payload = {**payload, "queue_position": position}
+        # If position is None here, a worker has already picked the job up
+        # (popped it from the queue) but hasn't written "running" yet --
+        # a brief, harmless window. The status will read "running" shortly.
+
     return response_json(payload, status=200)
 
 

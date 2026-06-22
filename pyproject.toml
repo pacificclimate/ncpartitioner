@@ -10,7 +10,8 @@ requires-python = ">=3.12"
 dependencies = [
     "gunicorn (>=23.0.0,<24.0.0)",
     "requests (>=2.32.5,<3.0.0)",
-    "flask (>=3.1.2,<4.0.0)"
+    "flask (>=3.1.2,<4.0.0)",
+    "redis (>=6.4.0,<7.0.0)"
 ]
 
 [tool.poetry]
