@@ -2,7 +2,6 @@
 In cases of DDS and DAS, the file already exists; for data requests the filemust be created first.
 """
 
-from posixpath import dirname
 import subprocess
 import os
 from flask import redirect
@@ -11,15 +10,26 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def input_filepath(args):
+    """Resolve the source file path for the current request."""
+    return os.path.join(
+        os.sep,
+        args["dirname"],
+        f"{args['basename']}.{args['extension']}",
+    )
+
+
 def slice(args):
     output_dir = os.getenv("OUTPUT_DIR")
     thredds_base = os.getenv("THREDDS_HTTP_BASE")
+    source_filepath = input_filepath(args)
 
     logger.info(f"Slicing file")
     try:
         subprocess.run(
             [
                 "ncks",
+                "-4",
                 "-v",
                 f"{args['variable']}",
                 "-d",
@@ -28,7 +38,7 @@ def slice(args):
                 f"lat,{args['lat'][0]},{args['lat'][1]}",
                 "-d",
                 f"lon,{args['lon'][0]},{args['lon'][1]}",
-                f"/{args['dirname']}/{args['basename']}.{args['extension']}",
+                source_filepath,
                 os.path.join(
                     output_dir,
                     f"{args['basename']}_{args['timestamp']}.{args['extension']}",
