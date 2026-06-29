@@ -33,6 +33,7 @@ def test_check_filepath(filepath, valid, error):
     "targets, valid, error",
     [
         ("time[0:100],lat[0:50],lon[0:100],tasmax[0:100][0:50][0:100]", True, None),
+        ("time[0:100],lat[0:50],lon[0:100],EVAP[0:100][0:50][0:100]", True, None),
         (
             "time[0:100],lat[0:50],lon[0:100],banana[0:100][0:50][0:100],tasmax[0:100][0:50][0:100]",
             False,

@@ -85,7 +85,10 @@ def test_slice_error(tmp_path, monkeypatch):
     assert response.status_code == 202
     payload = response.get_json()
     failed = wait_for_job_status(payload["job_id"], "failed")
-    assert failed["error"] == "boom"
+    assert (
+        failed["error"]
+        == "Subset request failed due to a processing error. Please try again."
+    )
 
 
 def test_execute_slice_job_marks_failure(tmp_path, monkeypatch):
@@ -116,7 +119,51 @@ def test_execute_slice_job_marks_failure(tmp_path, monkeypatch):
 
     payload = read_job_status(job_id)
     assert payload["status"] == "failed"
-    assert payload["error"] == "broken"
+    assert (
+        payload["error"]
+        == "Subset extraction failed. Try a smaller time or spatial range."
+    )
+
+
+def test_execute_slice_job_sanitizes_merge_failure(tmp_path, monkeypatch):
+    monkeypatch.setenv("OUTPUT_DIR", str(tmp_path))
+    monkeypatch.setenv("NCPARTITIONER_CHUNK_BYTES", "64")
+    request_args = {
+        "basename": "tasmax",
+        "dirname": "tests/data",
+        "extension": "nc",
+        "timestamp": 100,
+        "variable": "tasmax",
+        "time": (0, 4),
+        "lat": (0, 1),
+        "lon": (0, 3),
+    }
+    job_id = "merge-failed-job"
+    status_path = os.path.join(str(tmp_path), ".jobs", f"{job_id}.json")
+    os.makedirs(os.path.dirname(status_path), exist_ok=True)
+    os.makedirs(os.path.join(str(tmp_path), ".jobs", job_id), exist_ok=True)
+    with open(status_path, "w", encoding="utf-8") as handle:
+        handle.write(
+            '{"job_id":"merge-failed-job","status":"running","status_url":"partition/status/merge-failed-job","download_url":"x","output_filename":"y","started_at":"2026-01-01T00:00:00+00:00"}'
+        )
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "ncks":
+            os.makedirs(os.path.dirname(cmd[-1]), exist_ok=True)
+            with open(cmd[-1], "w", encoding="utf-8") as handle:
+                handle.write("chunk")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        raise subprocess.CalledProcessError(1, cmd)
+
+    with patch("ncpartitioner.response.subprocess.run", side_effect=fake_run):
+        execute_slice_job(job_id, request_args)
+
+    payload = read_job_status(job_id)
+    assert payload["status"] == "failed"
+    assert (
+        payload["error"]
+        == "Subset assembly failed. Try a smaller time or spatial range."
+    )
 
 
 def test_time_windows_uses_byte_budget(monkeypatch):

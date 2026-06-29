@@ -69,7 +69,8 @@ def check_targets_slice(targets):
             args[dim] = (start, end)
         else:
             varreg = re.match(
-                r"^([a-z]+)\[(\d+):(\d+)\]\[(\d+):(\d+)\]\[(\d+):(\d+)\]$", t
+                r"^([a-zA-Z0-9_]+)\[(\d+):(\d+)\]\[(\d+):(\d+)\]\[(\d+):(\d+)\]$",
+                t,
             )
             if varreg and args["variable"] is None:
                 args["variable"] = varreg.group(1)

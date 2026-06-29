@@ -146,6 +146,12 @@ def chunk_output_filepath(job_id, index):
     return os.path.join(job_temp_dir(job_id), f"chunk_{index:04d}.nc")
 
 
+def merge_round_output_filepath(job_id, round_index, batch_index):
+    return os.path.join(
+        job_temp_dir(job_id), f"merge_r{round_index:02d}_{batch_index:04d}.nc"
+    )
+
+
 def deflate_level():
     return int(os.getenv("NCPARTITIONER_DEFLATE_LEVEL", 1))
 
@@ -173,9 +179,20 @@ def cleanup_job_temp_dir(job_id):
     shutil.rmtree(job_temp_dir(job_id), ignore_errors=True)
 
 
-def subprocess_error_message(exc):
-    error = getattr(exc, "stderr", None)
-    return error.strip() if error else str(exc)
+def merge_batch_size():
+    return max(2, int(os.getenv("NCPARTITIONER_MERGE_BATCH_SIZE", 16)))
+
+
+def subprocess_error_message(exc, cmd):
+    if isinstance(exc, OSError):
+        return "Subset request failed due to a processing error. Please try again."
+
+    step = cmd[0] if cmd else "subprocess"
+    if step == "ncrcat":
+        return "Subset assembly failed. Try a smaller time or spatial range."
+    if step == "ncks":
+        return "Subset extraction failed. Try a smaller time or spatial range."
+    return "Subset request failed. Please try again."
 
 
 def fail_job(job_id, args, error, *, returncode=None):
@@ -218,10 +235,17 @@ def run_subprocess_step(job_id, args, cmd):
             check=True,
         )
     except (subprocess.CalledProcessError, OSError) as exc:
+        logger.exception(
+            "Slice job %s subprocess failed: cmd=%s returncode=%s stderr=%r",
+            job_id,
+            cmd,
+            getattr(exc, "returncode", None),
+            getattr(exc, "stderr", None),
+        )
         fail_job(
             job_id,
             args,
-            subprocess_error_message(exc),
+            subprocess_error_message(exc, cmd),
             returncode=getattr(exc, "returncode", None),
         )
         return _STEP_FAILED
@@ -234,6 +258,42 @@ DEFAULT_MAX_WORKERS = 3
 def max_workers(num_windows):
     configured = int(os.getenv("NCPARTITIONER_MAX_WORKERS", DEFAULT_MAX_WORKERS))
     return max(1, min(configured, num_windows))
+
+
+def merge_chunk_paths(job_id, args, chunk_paths, final_path):
+    if len(chunk_paths) == 1:
+        os.replace(chunk_paths[0], final_path)
+        return []
+
+    current_paths = list(chunk_paths)
+    temporary_outputs = []
+    round_index = 0
+
+    while len(current_paths) > 1:
+        next_paths = []
+        batch_size = merge_batch_size()
+        for batch_index, start in enumerate(range(0, len(current_paths), batch_size)):
+            batch = current_paths[start : start + batch_size]
+            if len(batch) == 1:
+                next_paths.append(batch[0])
+                continue
+
+            is_final_batch = len(current_paths) <= batch_size
+            destination = (
+                final_path
+                if is_final_batch
+                else merge_round_output_filepath(job_id, round_index, batch_index)
+            )
+            stderr = run_subprocess_step(job_id, args, ["ncrcat", *batch, destination])
+            if stderr is _STEP_FAILED:
+                return _STEP_FAILED
+            temporary_outputs.extend(path for path in batch if path != final_path)
+            next_paths.append(destination)
+
+        current_paths = next_paths
+        round_index += 1
+
+    return temporary_outputs
 
 
 def execute_slice_job(job_id, args):
@@ -286,16 +346,12 @@ def execute_slice_job(job_id, args):
             submit_more()
 
     ordered_chunk_paths = [completed_chunks[index] for index in range(len(windows))]
-    if len(ordered_chunk_paths) == 1:
-        os.replace(ordered_chunk_paths[0], final_path)
-    else:
-        stderr = run_subprocess_step(
-            job_id, args, ["ncrcat", *ordered_chunk_paths, final_path]
-        )
-        if stderr is _STEP_FAILED:
-            return
-        if stderr:
-            stderr_messages.append(stderr)
+    merged_inputs = merge_chunk_paths(job_id, args, ordered_chunk_paths, final_path)
+    if merged_inputs is _STEP_FAILED:
+        return
+    for path in merged_inputs:
+        if os.path.exists(path):
+            os.remove(path)
 
     cleanup_job_temp_dir(job_id)
     payload = read_job_status(job_id)
