@@ -29,6 +29,21 @@ def test_check_filepath(filepath, valid, error):
         assert str(excinfo.value).startswith(error)
 
 
+def test_check_filepath_preserves_multi_dot_basename(tmp_path, monkeypatch):
+    data_root = tmp_path / "data"
+    dataset_dir = data_root / "vicgl"
+    dataset_dir.mkdir(parents=True)
+    dataset = dataset_dir / "allwsbc.TPS_gridded_obs_init.1945to2099.GLAC_MBAL.nc"
+    dataset.write_text("", encoding="utf-8")
+    monkeypatch.setenv("DATA_ROOT", str(data_root).lstrip("/"))
+
+    args = check_filepath(f"{dataset}.nc")
+
+    assert args["dirname"] == str(dataset_dir)
+    assert args["basename"] == "allwsbc.TPS_gridded_obs_init.1945to2099.GLAC_MBAL"
+    assert args["extension"] == "nc"
+
+
 @pytest.mark.parametrize(
     "targets, valid, error",
     [

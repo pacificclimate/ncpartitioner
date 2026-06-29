@@ -10,7 +10,7 @@ def check_filepath(filepath):
 
     # filepaths have an extra suffix to indicate what format the user wants
     # the response in. Valid options are .nc (data request),.dds amd .das (metadata requests)
-    (filepath, request_format) = os.path.splitext(filepath)
+    filepath, request_format = os.path.splitext(filepath)
     if request_format not in [".nc", ".dds", ".das", ".ascii", ".asc"]:
         raise ValueError(
             f"Invalid request format: must be .nc, .dds, .das, or .ascii/.asc : {request_format}"
@@ -27,9 +27,10 @@ def check_filepath(filepath):
         raise ValueError(f"Invalid filepath: must start with {data_root} : {filepath}")
     # reamining filepath may end in .nc, or may be missing an extension, but must not have any
     # other extension.
-    if not filepath.endswith(".nc") and "." in filepath:
+    stem, extension = os.path.splitext(filepath)
+    if extension and extension != ".nc":
         raise ValueError(f"Invalid filepath: must be a .nc file {filepath}")
-    if not "." in filepath:  # add "missing" extension
+    if not extension:  # add "missing" extension
         filepath = f"{filepath}.nc"
     if not os.path.isfile(f"/{filepath}"):
         raise ValueError(
@@ -39,8 +40,9 @@ def check_filepath(filepath):
     # split filepath into convenient pieces
     args["timestamp"] = int(time.time())
     args["dirname"] = os.path.dirname(filepath)
-    args["basename"] = os.path.basename(filepath).split(".")[0]
-    args["extension"] = filepath.split(".")[-1]
+    basename, extension = os.path.splitext(os.path.basename(filepath))
+    args["basename"] = basename
+    args["extension"] = extension.lstrip(".")
 
     return args
 
