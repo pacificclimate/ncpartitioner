@@ -76,6 +76,15 @@ def time_dimension_is_unlimited(path):
         return dataset.dimensions["time"].isunlimited()
 
 
+def write_running_status(output_dir, job_id):
+    status_path = os.path.join(str(output_dir), ".jobs", f"{job_id}.json")
+    os.makedirs(os.path.dirname(status_path), exist_ok=True)
+    with open(status_path, "w", encoding="utf-8") as handle:
+        handle.write(
+            f'{{"job_id":"{job_id}","status":"running","status_url":"partition/status/{job_id}","download_url":"x","output_filename":"y","started_at":"2026-01-01T00:00:00+00:00"}}'
+        )
+
+
 def test_dds():
     response = dds(args)
     assert response.status_code == 302
@@ -228,6 +237,44 @@ def test_slice_command_outputs_unlimited_time_dimension(tmp_path, unlimited_time
     )
 
     assert time_dimension_is_unlimited(chunk)
+
+
+@pytest.mark.parametrize("unlimited_time", [False, True])
+def test_execute_slice_job_merges_fixed_and_unlimited_time_sources(
+    tmp_path, monkeypatch, unlimited_time
+):
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    source = input_dir / "tasmax.nc"
+    make_source_netcdf(source, unlimited_time=unlimited_time)
+    monkeypatch.setenv("OUTPUT_DIR", str(tmp_path))
+    monkeypatch.setenv("NCPARTITIONER_CHUNK_BYTES", "16")
+    request_args = {
+        "basename": "tasmax",
+        "dirname": str(input_dir),
+        "extension": "nc",
+        "timestamp": 101,
+        "variable": "tasmax",
+        "time": (0, 2),
+        "lat": (0, 1),
+        "lon": (0, 1),
+    }
+    job_id = f"merge-source-{unlimited_time}"
+    os.makedirs(os.path.join(str(tmp_path), ".jobs", job_id), exist_ok=True)
+    write_running_status(tmp_path, job_id)
+
+    execute_slice_job(job_id, request_args)
+
+    payload = read_job_status(job_id)
+    output = tmp_path / "tasmax_101.nc"
+    assert payload["status"] == "complete"
+    assert output.is_file()
+    assert not os.path.isdir(os.path.join(str(tmp_path), ".jobs", job_id))
+    with netCDF4.Dataset(output) as dataset:
+        assert dataset.dimensions["time"].isunlimited()
+        assert len(dataset.dimensions["time"]) == 3
+        assert dataset.variables["time"][:].tolist() == [0, 1, 2]
+        assert dataset.variables["tasmax"][:, 0, 0].tolist() == [0, 4, 8]
 
 
 @pytest.mark.parametrize(
