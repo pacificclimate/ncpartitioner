@@ -146,6 +146,10 @@ def chunk_output_filepath(job_id, index):
     return os.path.join(job_temp_dir(job_id), f"chunk_{index:04d}.nc")
 
 
+def final_temp_filepath(job_id, args):
+    return os.path.join(job_temp_dir(job_id), output_filename(args))
+
+
 def deflate_level():
     return int(os.getenv("NCPARTITIONER_DEFLATE_LEVEL", 1))
 
@@ -153,9 +157,11 @@ def deflate_level():
 def slice_command(args, source_filepath, destination, time_start, time_end):
     return [
         "ncks",
+        "-O",
+        "-h",
         "-4",
         "-L",
-        str(deflate_level()),
+        "0",
         "--mk_rec_dmn",
         "time",
         "-v",
@@ -167,6 +173,19 @@ def slice_command(args, source_filepath, destination, time_start, time_end):
         "-d",
         f"lon,{args['lon'][0]},{args['lon'][1]}",
         source_filepath,
+        destination,
+    ]
+
+
+def concat_command(chunk_paths, destination):
+    return [
+        "ncrcat",
+        "-O",
+        "-h",
+        "-4",
+        "-L",
+        str(deflate_level()),
+        *chunk_paths,
         destination,
     ]
 
@@ -302,16 +321,15 @@ def execute_slice_job(job_id, args):
             submit_more()
 
     ordered_chunk_paths = [completed_chunks[index] for index in range(len(windows))]
-    if len(ordered_chunk_paths) == 1:
-        os.replace(ordered_chunk_paths[0], final_path)
-    else:
-        stderr = run_subprocess_step(
-            job_id, args, ["ncrcat", *ordered_chunk_paths, final_path]
-        )
-        if stderr is _STEP_FAILED:
-            return
-        if stderr:
-            stderr_messages.append(stderr)
+    temp_final_path = final_temp_filepath(job_id, args)
+    stderr = run_subprocess_step(
+        job_id, args, concat_command(ordered_chunk_paths, temp_final_path)
+    )
+    if stderr is _STEP_FAILED:
+        return
+    if stderr:
+        stderr_messages.append(stderr)
+    os.replace(temp_final_path, final_path)
 
     cleanup_job_temp_dir(job_id)
     payload = read_job_status(job_id)

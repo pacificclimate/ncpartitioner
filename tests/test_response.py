@@ -12,6 +12,7 @@ pytestmark = pytest.mark.filterwarnings(
 )
 
 from ncpartitioner.response import (
+    concat_command,
     execute_slice_job,
     read_job_status,
     slice,
@@ -237,6 +238,38 @@ def test_slice_command_outputs_unlimited_time_dimension(tmp_path, unlimited_time
     )
 
     assert time_dimension_is_unlimited(chunk)
+
+
+def test_slice_command_uses_uncompressed_intermediate_chunks():
+    request_args = {
+        "variable": "tasmax",
+        "time": (0, 2),
+        "lat": (0, 1),
+        "lon": (0, 1),
+    }
+
+    command = slice_command(request_args, "/input.nc", "/chunk.nc", 0, 1)
+
+    assert command[:7] == ["ncks", "-O", "-h", "-4", "-L", "0", "--mk_rec_dmn"]
+    assert command[-2:] == ["/input.nc", "/chunk.nc"]
+
+
+def test_concat_command_applies_final_deflate_level(monkeypatch):
+    monkeypatch.setenv("NCPARTITIONER_DEFLATE_LEVEL", "2")
+
+    command = concat_command(["/chunk_0000.nc", "/chunk_0001.nc"], "/final.nc")
+
+    assert command == [
+        "ncrcat",
+        "-O",
+        "-h",
+        "-4",
+        "-L",
+        "2",
+        "/chunk_0000.nc",
+        "/chunk_0001.nc",
+        "/final.nc",
+    ]
 
 
 @pytest.mark.parametrize("unlimited_time", [False, True])
