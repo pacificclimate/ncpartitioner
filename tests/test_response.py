@@ -4,12 +4,18 @@ import subprocess
 import time
 from unittest.mock import patch
 
+import netCDF4
 import pytest
+
+pytestmark = pytest.mark.filterwarnings(
+    "ignore:Setting the shape on a NumPy array has been deprecated:DeprecationWarning"
+)
 
 from ncpartitioner.response import (
     execute_slice_job,
     read_job_status,
     slice,
+    slice_command,
     dds,
     das,
     time_windows,
@@ -43,6 +49,31 @@ def wait_for_job_status(job_id, expected_status, timeout=10):
     raise AssertionError(
         f"Timed out waiting for job {job_id} to reach {expected_status}; last payload={read_job_status(job_id)}"
     )
+
+
+def make_source_netcdf(path, *, unlimited_time):
+    with netCDF4.Dataset(path, "w", format="NETCDF4") as dataset:
+        dataset.createDimension("time", None if unlimited_time else 3)
+        dataset.createDimension("lat", 2)
+        dataset.createDimension("lon", 2)
+        time_var = dataset.createVariable("time", "i4", ("time",))
+        lat_var = dataset.createVariable("lat", "f4", ("lat",))
+        lon_var = dataset.createVariable("lon", "f4", ("lon",))
+        data_var = dataset.createVariable("tasmax", "f4", ("time", "lat", "lon"))
+        time_var[:] = [0, 1, 2]
+        lat_var[:] = [0, 1]
+        lon_var[:] = [0, 1]
+        for time_index in range(3):
+            for lat_index in range(2):
+                for lon_index in range(2):
+                    data_var[time_index, lat_index, lon_index] = (
+                        time_index * 4 + lat_index * 2 + lon_index
+                    )
+
+
+def time_dimension_is_unlimited(path):
+    with netCDF4.Dataset(path) as dataset:
+        return dataset.dimensions["time"].isunlimited()
 
 
 def test_dds():
@@ -177,6 +208,26 @@ def test_time_windows_uses_byte_budget(monkeypatch):
     windows = time_windows(request_args)
 
     assert windows == [(0, 1), (2, 3), (4, 5), (6, 7), (8, 9), (10, 10)]
+
+
+@pytest.mark.parametrize("unlimited_time", [False, True])
+def test_slice_command_outputs_unlimited_time_dimension(tmp_path, unlimited_time):
+    source = tmp_path / "source.nc"
+    chunk = tmp_path / "chunk.nc"
+    make_source_netcdf(source, unlimited_time=unlimited_time)
+    request_args = {
+        "variable": "tasmax",
+        "time": (0, 2),
+        "lat": (0, 1),
+        "lon": (0, 1),
+    }
+
+    subprocess.run(
+        slice_command(request_args, str(source), str(chunk), 0, 1),
+        check=True,
+    )
+
+    assert time_dimension_is_unlimited(chunk)
 
 
 @pytest.mark.parametrize(

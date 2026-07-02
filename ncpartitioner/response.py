@@ -162,6 +162,8 @@ def slice_command(args, source_filepath, destination, time_start, time_end):
         "-4",
         "-L",
         str(deflate_level()),
+        "--mk_rec_dmn",
+        "time",
         "-v",
         f"{args['variable']}",
         "-d",
@@ -229,8 +231,8 @@ def run_subprocess_step(job_id, args, cmd):
     try:
         result = subprocess.run(
             cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
             check=True,
         )
@@ -249,7 +251,7 @@ def run_subprocess_step(job_id, args, cmd):
             returncode=getattr(exc, "returncode", None),
         )
         return _STEP_FAILED
-    return result.stderr.strip() if result.stderr else None
+    return result.stdout.strip() if result.stdout else None
 
 
 DEFAULT_MAX_WORKERS = 3
