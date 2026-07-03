@@ -21,6 +21,7 @@ To do end-to-end testing, you will also need a THREDDS instance running on your 
 * `NCPARTITIONER_CHUNK_BYTES` - optional target size, in bytes, for each time-window slice job; defaults to `314572800` (300 MiB). Smaller values reduce per-`ncks` memory pressure but create more chunks.
 * `NCPARTITIONER_MAX_WORKERS` - optional maximum number of chunk extraction workers; defaults to `3`. Increase cautiously because each worker runs its own `ncks` process.
 * `NCPARTITIONER_DEFLATE_LEVEL` - optional netCDF4 compression level passed to the final `ncrcat -L`; defaults to `1`. Intermediate `ncks` chunks are written with `-L 0` to avoid compressing files that are immediately concatenated.
+* `NCPARTITIONER_NCRCAT_THREADS` - optional thread count passed to final `ncrcat -t`; defaults to `1`. Increase only after measuring because higher values can increase CPU and IO contention.
 
 Run with flask:
 ```
@@ -83,6 +84,7 @@ Chunking notes:
 * Chunk extraction runs in parallel up to `NCPARTITIONER_MAX_WORKERS`
 * Intermediate chunks are written to temporary files with `ncks -L 0` and `--mk_rec_dmn time`
 * Completed chunks are concatenated in time order with a single final `ncrcat`, which applies `NCPARTITIONER_DEFLATE_LEVEL`
+* NCO internal temp files are disabled with `--no_tmp_fl` because all chunk and final-merge output is already written under job-scoped `.jobs/<job_id>` paths before publication
 * `NCPARTITIONER_CHUNK_BYTES` is a per-chunk target, not a per-time-index target
 * Approximate in-flight slice memory is `NCPARTITIONER_CHUNK_BYTES * NCPARTITIONER_MAX_WORKERS`, plus process and netCDF/NCO overhead
 * The chunk planner currently estimates bytes from `lat * lon * 4`, so real memory usage can be higher for larger datatypes such as `Float64`

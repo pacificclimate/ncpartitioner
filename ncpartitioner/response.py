@@ -16,6 +16,7 @@ import subprocess
 import threading
 import uuid
 from datetime import datetime, timezone
+from time import monotonic
 
 from flask import Response, redirect
 
@@ -154,11 +155,16 @@ def deflate_level():
     return int(os.getenv("NCPARTITIONER_DEFLATE_LEVEL", 1))
 
 
+def ncrcat_threads():
+    return max(1, int(os.getenv("NCPARTITIONER_NCRCAT_THREADS", 1)))
+
+
 def slice_command(args, source_filepath, destination, time_start, time_end):
     return [
         "ncks",
         "-O",
         "-h",
+        "--no_tmp_fl",
         "-4",
         "-L",
         "0",
@@ -178,16 +184,20 @@ def slice_command(args, source_filepath, destination, time_start, time_end):
 
 
 def concat_command(chunk_paths, destination):
-    return [
+    command = [
         "ncrcat",
         "-O",
         "-h",
+        "--no_tmp_fl",
         "-4",
         "-L",
         str(deflate_level()),
-        *chunk_paths,
-        destination,
     ]
+    threads = ncrcat_threads()
+    if threads > 1:
+        command.extend(["-t", str(threads)])
+    command.extend([*chunk_paths, destination])
+    return command
 
 
 def cleanup_job_temp_dir(job_id):
@@ -271,6 +281,10 @@ def max_workers(num_windows):
     return max(1, min(configured, num_windows))
 
 
+def total_file_size(paths):
+    return sum(os.path.getsize(path) for path in paths if os.path.exists(path))
+
+
 def execute_slice_job(job_id, args):
     """Run one slice job, invoked by the worker process."""
     source_filepath = input_filepath(args)
@@ -281,6 +295,14 @@ def execute_slice_job(job_id, args):
     completed_chunks, in_flight = {}, {}
     next_to_submit = 0
     stderr_messages = []
+    job_started = monotonic()
+
+    logger.info(
+        "Slice job %s extracting %s chunks with %s workers",
+        job_id,
+        len(windows),
+        workers,
+    )
 
     def slice_one(index, time_start, time_end):
         chunk_path = chunk_output_filepath(job_id, index)
@@ -320,8 +342,17 @@ def execute_slice_job(job_id, args):
 
             submit_more()
 
+    extraction_finished = monotonic()
     ordered_chunk_paths = [completed_chunks[index] for index in range(len(windows))]
     temp_final_path = final_temp_filepath(job_id, args)
+    chunk_bytes = total_file_size(ordered_chunk_paths)
+    logger.info(
+        "Slice job %s extracted %s chunks (%s bytes) in %.2fs; starting ncrcat",
+        job_id,
+        len(ordered_chunk_paths),
+        chunk_bytes,
+        extraction_finished - job_started,
+    )
     stderr = run_subprocess_step(
         job_id, args, concat_command(ordered_chunk_paths, temp_final_path)
     )
@@ -330,6 +361,13 @@ def execute_slice_job(job_id, args):
     if stderr:
         stderr_messages.append(stderr)
     os.replace(temp_final_path, final_path)
+    merge_finished = monotonic()
+    logger.info(
+        "Slice job %s finished ncrcat in %.2fs; final size=%s bytes",
+        job_id,
+        merge_finished - extraction_finished,
+        os.path.getsize(final_path) if os.path.exists(final_path) else None,
+    )
 
     cleanup_job_temp_dir(job_id)
     payload = read_job_status(job_id)

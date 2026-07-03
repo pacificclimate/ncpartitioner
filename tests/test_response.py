@@ -250,7 +250,16 @@ def test_slice_command_uses_uncompressed_intermediate_chunks():
 
     command = slice_command(request_args, "/input.nc", "/chunk.nc", 0, 1)
 
-    assert command[:7] == ["ncks", "-O", "-h", "-4", "-L", "0", "--mk_rec_dmn"]
+    assert command[:8] == [
+        "ncks",
+        "-O",
+        "-h",
+        "--no_tmp_fl",
+        "-4",
+        "-L",
+        "0",
+        "--mk_rec_dmn",
+    ]
     assert command[-2:] == ["/input.nc", "/chunk.nc"]
 
 
@@ -263,6 +272,7 @@ def test_concat_command_applies_final_deflate_level(monkeypatch):
         "ncrcat",
         "-O",
         "-h",
+        "--no_tmp_fl",
         "-4",
         "-L",
         "2",
@@ -270,6 +280,16 @@ def test_concat_command_applies_final_deflate_level(monkeypatch):
         "/chunk_0001.nc",
         "/final.nc",
     ]
+
+
+def test_concat_command_supports_ncrcat_threads(monkeypatch):
+    monkeypatch.setenv("NCPARTITIONER_NCRCAT_THREADS", "4")
+
+    command = concat_command(["/chunk_0000.nc"], "/final.nc")
+
+    assert "-t" in command
+    assert command[command.index("-t") + 1] == "4"
+    assert command[-2:] == ["/chunk_0000.nc", "/final.nc"]
 
 
 @pytest.mark.parametrize("unlimited_time", [False, True])
