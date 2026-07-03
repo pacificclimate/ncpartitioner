@@ -207,8 +207,51 @@ def test_execute_slice_job_sanitizes_merge_failure(tmp_path, monkeypatch):
     )
 
 
+def test_execute_slice_job_reports_chunk_progress_during_merge(tmp_path, monkeypatch):
+    monkeypatch.setenv("OUTPUT_DIR", str(tmp_path))
+    monkeypatch.setenv("NCPARTITIONER_CHUNK_BYTES", "64")
+    request_args = {
+        "basename": "tasmax",
+        "dirname": "tests/data",
+        "extension": "nc",
+        "timestamp": 102,
+        "variable": "tasmax",
+        "time": (0, 4),
+        "lat": (0, 1),
+        "lon": (0, 3),
+    }
+    job_id = "progress-job"
+    os.makedirs(os.path.join(str(tmp_path), ".jobs", job_id), exist_ok=True)
+    write_running_status(tmp_path, job_id)
+    expected_chunks = len(time_windows(request_args))
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "ncks":
+            os.makedirs(os.path.dirname(cmd[-1]), exist_ok=True)
+            with open(cmd[-1], "w", encoding="utf-8") as handle:
+                handle.write("chunk")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        payload = read_job_status(job_id)
+        assert payload["status"] == "running"
+        assert payload["phase"] == "merging"
+        assert payload["chunks_complete"] == expected_chunks
+        assert payload["chunks_total"] == expected_chunks
+        assert payload["chunk_bytes"] > 0
+        with open(cmd[-1], "w", encoding="utf-8") as handle:
+            handle.write("final")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    with patch("ncpartitioner.response.subprocess.run", side_effect=fake_run):
+        execute_slice_job(job_id, request_args)
+
+    payload = read_job_status(job_id)
+    assert payload["status"] == "complete"
+
+
 def test_time_windows_uses_byte_budget(monkeypatch):
     monkeypatch.setenv("NCPARTITIONER_CHUNK_BYTES", "64")
+    monkeypatch.setenv("NCPARTITIONER_BYTES_PER_ELEMENT", "4")
     request_args = {
         "time": (0, 10),
         "lat": (0, 1),
@@ -218,6 +261,20 @@ def test_time_windows_uses_byte_budget(monkeypatch):
     windows = time_windows(request_args)
 
     assert windows == [(0, 1), (2, 3), (4, 5), (6, 7), (8, 9), (10, 10)]
+
+
+def test_time_windows_defaults_to_float64_budget(monkeypatch):
+    monkeypatch.setenv("NCPARTITIONER_CHUNK_BYTES", "64")
+    monkeypatch.delenv("NCPARTITIONER_BYTES_PER_ELEMENT", raising=False)
+    request_args = {
+        "time": (0, 4),
+        "lat": (0, 1),
+        "lon": (0, 3),
+    }
+
+    windows = time_windows(request_args)
+
+    assert windows == [(0, 0), (1, 1), (2, 2), (3, 3), (4, 4)]
 
 
 @pytest.mark.parametrize("unlimited_time", [False, True])
@@ -240,7 +297,8 @@ def test_slice_command_outputs_unlimited_time_dimension(tmp_path, unlimited_time
     assert time_dimension_is_unlimited(chunk)
 
 
-def test_slice_command_uses_uncompressed_intermediate_chunks():
+def test_slice_command_uses_configured_intermediate_deflate(monkeypatch):
+    monkeypatch.setenv("NCPARTITIONER_INTERMEDIATE_DEFLATE_LEVEL", "2")
     request_args = {
         "variable": "tasmax",
         "time": (0, 2),
@@ -257,7 +315,7 @@ def test_slice_command_uses_uncompressed_intermediate_chunks():
         "--no_tmp_fl",
         "-4",
         "-L",
-        "0",
+        "2",
         "--mk_rec_dmn",
     ]
     assert command[-2:] == ["/input.nc", "/chunk.nc"]

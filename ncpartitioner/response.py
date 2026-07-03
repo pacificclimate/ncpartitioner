@@ -115,6 +115,20 @@ def read_job_status(job_id):
         return None
 
 
+def write_running_job_status(job_id, args, **extra):
+    existing = read_job_status(job_id) or {}
+    write_job_status(
+        job_id,
+        build_job_status(
+            job_id,
+            args,
+            "running",
+            started_at=existing.get("started_at") or utcnow_iso(),
+            **extra,
+        ),
+    )
+
+
 def status_url(job_id):
     return f"partition/status/{job_id}"
 
@@ -123,14 +137,12 @@ def response_json(payload, status=200):
     return Response(json.dumps(payload), status=status, mimetype="application/json")
 
 
-# Target chunk size in bytes, used to size time windows so that a single
-# ncks slice has a roughly constant memory/IO footprint regardless of how
-# large a spatial subset the request covers.
-BYTES_PER_ELEMENT = 4  # adjust per dtype if you support more than float32
-
-
 def chunk_byte_budget():
     return int(os.getenv("NCPARTITIONER_CHUNK_BYTES", 300 * 1024 * 1024))  # ~300MB
+
+
+def bytes_per_element():
+    return int(os.getenv("NCPARTITIONER_BYTES_PER_ELEMENT", 8))
 
 
 def time_windows(args):
@@ -138,7 +150,7 @@ def time_windows(args):
     lat0, lat1 = args["lat"]
     lon0, lon1 = args["lon"]
     n_lat, n_lon = lat1 - lat0 + 1, lon1 - lon0 + 1
-    bytes_per_step = max(n_lat * n_lon * BYTES_PER_ELEMENT, 1)
+    bytes_per_step = max(n_lat * n_lon * bytes_per_element(), 1)
     window = max(1, chunk_byte_budget() // bytes_per_step)
     return [(s, min(s + window - 1, end)) for s in range(start, end + 1, window)]
 
@@ -155,6 +167,10 @@ def deflate_level():
     return int(os.getenv("NCPARTITIONER_DEFLATE_LEVEL", 1))
 
 
+def intermediate_deflate_level():
+    return int(os.getenv("NCPARTITIONER_INTERMEDIATE_DEFLATE_LEVEL", deflate_level()))
+
+
 def ncrcat_threads():
     return max(1, int(os.getenv("NCPARTITIONER_NCRCAT_THREADS", 1)))
 
@@ -167,7 +183,7 @@ def slice_command(args, source_filepath, destination, time_start, time_end):
         "--no_tmp_fl",
         "-4",
         "-L",
-        "0",
+        str(intermediate_deflate_level()),
         "--mk_rec_dmn",
         "time",
         "-v",
@@ -303,6 +319,13 @@ def execute_slice_job(job_id, args):
         len(windows),
         workers,
     )
+    write_running_job_status(
+        job_id,
+        args,
+        phase="extracting",
+        chunks_complete=0,
+        chunks_total=len(windows),
+    )
 
     def slice_one(index, time_start, time_end):
         chunk_path = chunk_output_filepath(job_id, index)
@@ -340,6 +363,13 @@ def execute_slice_job(job_id, args):
                     stderr_messages.append(stderr)
                 completed_chunks[index] = chunk_path
 
+            write_running_job_status(
+                job_id,
+                args,
+                phase="extracting",
+                chunks_complete=len(completed_chunks),
+                chunks_total=len(windows),
+            )
             submit_more()
 
     extraction_finished = monotonic()
@@ -352,6 +382,14 @@ def execute_slice_job(job_id, args):
         len(ordered_chunk_paths),
         chunk_bytes,
         extraction_finished - job_started,
+    )
+    write_running_job_status(
+        job_id,
+        args,
+        phase="merging",
+        chunks_complete=len(ordered_chunk_paths),
+        chunks_total=len(windows),
+        chunk_bytes=chunk_bytes,
     )
     stderr = run_subprocess_step(
         job_id, args, concat_command(ordered_chunk_paths, temp_final_path)
