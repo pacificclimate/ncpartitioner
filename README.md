@@ -18,11 +18,10 @@ To do end-to-end testing, you will also need a THREDDS instance running on your 
 * `THREDDS_HTTP_BASE` - the base URL for the THREDDS http server (probably ends /fileserver); a user will be redirected to download the completed file
 * `THREDDS_DAP_BASE` - the base URL for the THREDDS openDAP server (probably ends /dodsC): used to fulfill metadata requests
 * `DATA_ROOT` - directory under which all data is found; prevents files outside the directory from being served
-* `NCPARTITIONER_CHUNK_BYTES` - optional target size, in bytes, for each time-window slice job; defaults to `314572800` (300 MiB). Smaller values reduce per-`ncks` memory pressure but create more chunks.
-* `NCPARTITIONER_BYTES_PER_ELEMENT` - optional byte estimate used by the chunk planner; defaults to `8` to size conservatively for `Float64` datasets.
-* `NCPARTITIONER_MAX_WORKERS` - optional maximum number of chunk extraction workers; defaults to `3`. Increase cautiously because each worker runs its own `ncks` process.
+* `NCPARTITIONER_CHUNK_BYTES` - optional target size, in bytes, for each time-window slice job; defaults to `1073741824` (1 GiB). Smaller values reduce per-`ncks` memory pressure but create more chunks.
+* `NCPARTITIONER_BYTES_PER_ELEMENT` - optional byte estimate used by the chunk planner; defaults to `4`.
+* `NCPARTITIONER_MAX_WORKERS` - optional maximum number of chunk extraction workers; defaults to `1`. Increase cautiously because each worker runs its own `ncks` process.
 * `NCPARTITIONER_DEFLATE_LEVEL` - optional netCDF4 compression level passed to the final `ncrcat -L`; defaults to `1`.
-* `NCPARTITIONER_INTERMEDIATE_DEFLATE_LEVEL` - optional netCDF4 compression level passed to intermediate `ncks -L`; defaults to `NCPARTITIONER_DEFLATE_LEVEL`. Setting this to `0` can speed extraction for small jobs, but can massively expand compressed source data on disk.
 * `NCPARTITIONER_NCRCAT_THREADS` - optional thread count passed to final `ncrcat -t`; defaults to `1`. Increase only after measuring because higher values can increase CPU and IO contention.
 
 Run with flask:
@@ -91,8 +90,9 @@ Chunking notes:
 
 * Large requests are split into multiple time windows based on `NCPARTITIONER_CHUNK_BYTES`
 * Chunk extraction runs in parallel up to `NCPARTITIONER_MAX_WORKERS`
-* Intermediate chunks are written to temporary files with `ncks --mk_rec_dmn time` and `NCPARTITIONER_INTERMEDIATE_DEFLATE_LEVEL`
+* Intermediate chunks are written to temporary files with plain `ncks` subsetting, preserving the source output behavior. The chunk step does not force `-4`, `-L`, or `--mk_rec_dmn time`.
 * Completed chunks are concatenated in time order with a single final `ncrcat`, which applies `NCPARTITIONER_DEFLATE_LEVEL`
+* If the first `ncrcat` fails because chunks are not record-dimension files, the job converts chunk copies with `ncks --mk_rec_dmn time` and retries `ncrcat`
 * NCO internal temp files are disabled with `--no_tmp_fl` because all chunk and final-merge output is already written under job-scoped `.jobs/<job_id>` paths before publication
 * `NCPARTITIONER_CHUNK_BYTES` is a per-chunk target, not a per-time-index target
 * Approximate in-flight slice memory is `NCPARTITIONER_CHUNK_BYTES * NCPARTITIONER_MAX_WORKERS`, plus process and netCDF/NCO overhead

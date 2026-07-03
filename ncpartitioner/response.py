@@ -138,11 +138,11 @@ def response_json(payload, status=200):
 
 
 def chunk_byte_budget():
-    return int(os.getenv("NCPARTITIONER_CHUNK_BYTES", 300 * 1024 * 1024))  # ~300MB
+    return int(os.getenv("NCPARTITIONER_CHUNK_BYTES", 1024 * 1024 * 1024))
 
 
 def bytes_per_element():
-    return int(os.getenv("NCPARTITIONER_BYTES_PER_ELEMENT", 8))
+    return int(os.getenv("NCPARTITIONER_BYTES_PER_ELEMENT", 4))
 
 
 def time_windows(args):
@@ -167,10 +167,6 @@ def deflate_level():
     return int(os.getenv("NCPARTITIONER_DEFLATE_LEVEL", 1))
 
 
-def intermediate_deflate_level():
-    return int(os.getenv("NCPARTITIONER_INTERMEDIATE_DEFLATE_LEVEL", deflate_level()))
-
-
 def ncrcat_threads():
     return max(1, int(os.getenv("NCPARTITIONER_NCRCAT_THREADS", 1)))
 
@@ -181,11 +177,6 @@ def slice_command(args, source_filepath, destination, time_start, time_end):
         "-O",
         "-h",
         "--no_tmp_fl",
-        "-4",
-        "-L",
-        str(intermediate_deflate_level()),
-        "--mk_rec_dmn",
-        "time",
         "-v",
         f"{args['variable']}",
         "-d",
@@ -195,6 +186,23 @@ def slice_command(args, source_filepath, destination, time_start, time_end):
         "-d",
         f"lon,{args['lon'][0]},{args['lon'][1]}",
         source_filepath,
+        destination,
+    ]
+
+
+def record_chunk_output_filepath(job_id, index):
+    return os.path.join(job_temp_dir(job_id), f"record_chunk_{index:04d}.nc")
+
+
+def make_record_dimension_command(source, destination):
+    return [
+        "ncks",
+        "-O",
+        "-h",
+        "--no_tmp_fl",
+        "--mk_rec_dmn",
+        "time",
+        source,
         destination,
     ]
 
@@ -258,27 +266,36 @@ def fail_job(job_id, args, error, *, returncode=None):
 _STEP_FAILED = object()
 
 
+def run_subprocess(cmd):
+    result = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=True,
+    )
+    return result.stdout.strip() if result.stdout else None
+
+
+def log_subprocess_failure(job_id, cmd, exc, *, fallback=False):
+    log = logger.warning if fallback else logger.exception
+    log(
+        "Slice job %s subprocess failed: cmd=%s returncode=%s output=%r",
+        job_id,
+        cmd,
+        getattr(exc, "returncode", None),
+        getattr(exc, "stdout", None) or getattr(exc, "stderr", None),
+    )
+
+
 def run_subprocess_step(job_id, args, cmd):
-    """Run a single ncks/ncrcat step. Returns the stripped stderr output (or
-    None) on success. On failure, fails the job and returns the sentinel
-    _STEP_FAILED so callers can short-circuit without raising.
+    """Run a subprocess step. Returns stripped output (or None) on success.
+    On failure, fails the job and returns _STEP_FAILED.
     """
     try:
-        result = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            check=True,
-        )
+        return run_subprocess(cmd)
     except (subprocess.CalledProcessError, OSError) as exc:
-        logger.exception(
-            "Slice job %s subprocess failed: cmd=%s returncode=%s output=%r",
-            job_id,
-            cmd,
-            getattr(exc, "returncode", None),
-            getattr(exc, "stdout", None) or getattr(exc, "stderr", None),
-        )
+        log_subprocess_failure(job_id, cmd, exc)
         fail_job(
             job_id,
             args,
@@ -286,10 +303,29 @@ def run_subprocess_step(job_id, args, cmd):
             returncode=getattr(exc, "returncode", None),
         )
         return _STEP_FAILED
-    return result.stdout.strip() if result.stdout else None
 
 
-DEFAULT_MAX_WORKERS = 3
+def try_subprocess_step(job_id, cmd):
+    """Run a subprocess step without mutating job status on failure."""
+    try:
+        return True, run_subprocess(cmd), None
+    except (subprocess.CalledProcessError, OSError) as exc:
+        log_subprocess_failure(job_id, cmd, exc, fallback=True)
+        return False, None, exc
+
+
+def looks_like_missing_record_dimension(exc):
+    output = (
+        getattr(exc, "stdout", None) or getattr(exc, "stderr", None) or ""
+    ).lower()
+    return (
+        "record" in output
+        or "unlimited" in output
+        or "no variables fit criteria" in output
+    )
+
+
+DEFAULT_MAX_WORKERS = 1
 
 
 def max_workers(num_windows):
@@ -299,6 +335,64 @@ def max_workers(num_windows):
 
 def total_file_size(paths):
     return sum(os.path.getsize(path) for path in paths if os.path.exists(path))
+
+
+def concat_chunks_with_fallback(job_id, args, chunk_paths, destination):
+    command = concat_command(chunk_paths, destination)
+    success, stderr, exc = try_subprocess_step(job_id, command)
+    if success:
+        return [stderr] if stderr else []
+
+    if not looks_like_missing_record_dimension(exc):
+        fail_job(
+            job_id,
+            args,
+            subprocess_error_message(exc, command),
+            returncode=getattr(exc, "returncode", None),
+        )
+        return _STEP_FAILED
+
+    logger.info(
+        "Slice job %s ncrcat fallback triggered; converting chunks to record dimension",
+        job_id,
+    )
+    write_running_job_status(
+        job_id,
+        args,
+        phase="converting_record_dimension",
+        chunks_complete=len(chunk_paths),
+        chunks_total=len(chunk_paths),
+        ncrcat_fallback=True,
+    )
+
+    converted_paths = []
+    conversion_messages = []
+    for index, chunk_path in enumerate(chunk_paths):
+        converted_path = record_chunk_output_filepath(job_id, index)
+        stderr = run_subprocess_step(
+            job_id, args, make_record_dimension_command(chunk_path, converted_path)
+        )
+        if stderr is _STEP_FAILED:
+            return _STEP_FAILED
+        if stderr:
+            conversion_messages.append(stderr)
+        converted_paths.append(converted_path)
+
+    retry_command = concat_command(converted_paths, destination)
+    success, stderr, retry_exc = try_subprocess_step(job_id, retry_command)
+    if not success:
+        fail_job(
+            job_id,
+            args,
+            subprocess_error_message(retry_exc, retry_command),
+            returncode=getattr(retry_exc, "returncode", None),
+        )
+        return _STEP_FAILED
+
+    messages = conversion_messages
+    if stderr:
+        messages.append(stderr)
+    return messages
 
 
 def execute_slice_job(job_id, args):
@@ -314,10 +408,12 @@ def execute_slice_job(job_id, args):
     job_started = monotonic()
 
     logger.info(
-        "Slice job %s extracting %s chunks with %s workers",
+        "Slice job %s extracting %s chunks with %s workers; chunk_byte_budget=%s final_deflate_level=%s",
         job_id,
         len(windows),
         workers,
+        chunk_byte_budget(),
+        deflate_level(),
     )
     write_running_job_status(
         job_id,
@@ -391,13 +487,12 @@ def execute_slice_job(job_id, args):
         chunks_total=len(windows),
         chunk_bytes=chunk_bytes,
     )
-    stderr = run_subprocess_step(
-        job_id, args, concat_command(ordered_chunk_paths, temp_final_path)
+    merge_messages = concat_chunks_with_fallback(
+        job_id, args, ordered_chunk_paths, temp_final_path
     )
-    if stderr is _STEP_FAILED:
+    if merge_messages is _STEP_FAILED:
         return
-    if stderr:
-        stderr_messages.append(stderr)
+    stderr_messages.extend(msg for msg in merge_messages if msg)
     os.replace(temp_final_path, final_path)
     merge_finished = monotonic()
     logger.info(

@@ -12,8 +12,12 @@ pytestmark = pytest.mark.filterwarnings(
 )
 
 from ncpartitioner.response import (
+    DEFAULT_MAX_WORKERS,
     concat_command,
+    chunk_byte_budget,
     execute_slice_job,
+    looks_like_missing_record_dimension,
+    make_record_dimension_command,
     read_job_status,
     slice,
     slice_command,
@@ -70,11 +74,6 @@ def make_source_netcdf(path, *, unlimited_time):
                     data_var[time_index, lat_index, lon_index] = (
                         time_index * 4 + lat_index * 2 + lon_index
                     )
-
-
-def time_dimension_is_unlimited(path):
-    with netCDF4.Dataset(path) as dataset:
-        return dataset.dimensions["time"].isunlimited()
 
 
 def write_running_status(output_dir, job_id):
@@ -263,7 +262,7 @@ def test_time_windows_uses_byte_budget(monkeypatch):
     assert windows == [(0, 1), (2, 3), (4, 5), (6, 7), (8, 9), (10, 10)]
 
 
-def test_time_windows_defaults_to_float64_budget(monkeypatch):
+def test_time_windows_defaults_to_float32_budget(monkeypatch):
     monkeypatch.setenv("NCPARTITIONER_CHUNK_BYTES", "64")
     monkeypatch.delenv("NCPARTITIONER_BYTES_PER_ELEMENT", raising=False)
     request_args = {
@@ -274,31 +273,20 @@ def test_time_windows_defaults_to_float64_budget(monkeypatch):
 
     windows = time_windows(request_args)
 
-    assert windows == [(0, 0), (1, 1), (2, 2), (3, 3), (4, 4)]
+    assert windows == [(0, 1), (2, 3), (4, 4)]
 
 
-@pytest.mark.parametrize("unlimited_time", [False, True])
-def test_slice_command_outputs_unlimited_time_dimension(tmp_path, unlimited_time):
-    source = tmp_path / "source.nc"
-    chunk = tmp_path / "chunk.nc"
-    make_source_netcdf(source, unlimited_time=unlimited_time)
-    request_args = {
-        "variable": "tasmax",
-        "time": (0, 2),
-        "lat": (0, 1),
-        "lon": (0, 1),
-    }
+def test_chunk_byte_budget_defaults_to_one_gib(monkeypatch):
+    monkeypatch.delenv("NCPARTITIONER_CHUNK_BYTES", raising=False)
 
-    subprocess.run(
-        slice_command(request_args, str(source), str(chunk), 0, 1),
-        check=True,
-    )
-
-    assert time_dimension_is_unlimited(chunk)
+    assert chunk_byte_budget() == 1024 * 1024 * 1024
 
 
-def test_slice_command_uses_configured_intermediate_deflate(monkeypatch):
-    monkeypatch.setenv("NCPARTITIONER_INTERMEDIATE_DEFLATE_LEVEL", "2")
+def test_default_max_workers_is_one():
+    assert DEFAULT_MAX_WORKERS == 1
+
+
+def test_slice_command_uses_source_format_without_intermediate_deflate():
     request_args = {
         "variable": "tasmax",
         "time": (0, 2),
@@ -308,17 +296,38 @@ def test_slice_command_uses_configured_intermediate_deflate(monkeypatch):
 
     command = slice_command(request_args, "/input.nc", "/chunk.nc", 0, 1)
 
-    assert command[:8] == [
+    assert command == [
         "ncks",
         "-O",
         "-h",
         "--no_tmp_fl",
-        "-4",
-        "-L",
-        "2",
-        "--mk_rec_dmn",
+        "-v",
+        "tasmax",
+        "-d",
+        "time,0,1",
+        "-d",
+        "lat,0,1",
+        "-d",
+        "lon,0,1",
+        "/input.nc",
+        "/chunk.nc",
     ]
-    assert command[-2:] == ["/input.nc", "/chunk.nc"]
+    assert "-4" not in command
+    assert "-L" not in command
+    assert "--mk_rec_dmn" not in command
+
+
+def test_make_record_dimension_command():
+    assert make_record_dimension_command("/chunk.nc", "/record_chunk.nc") == [
+        "ncks",
+        "-O",
+        "-h",
+        "--no_tmp_fl",
+        "--mk_rec_dmn",
+        "time",
+        "/chunk.nc",
+        "/record_chunk.nc",
+    ]
 
 
 def test_concat_command_applies_final_deflate_level(monkeypatch):
@@ -348,6 +357,125 @@ def test_concat_command_supports_ncrcat_threads(monkeypatch):
     assert "-t" in command
     assert command[command.index("-t") + 1] == "4"
     assert command[-2:] == ["/chunk_0000.nc", "/final.nc"]
+
+
+def test_intermediate_deflate_env_is_not_referenced():
+    removed_env = "NCPARTITIONER_" + "INTERMEDIATE_DEFLATE_LEVEL"
+    with open("ncpartitioner/response.py", encoding="utf-8") as handle:
+        assert removed_env not in handle.read()
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "ncrcat: ERROR no variables fit criteria",
+        "record dimension not found",
+        "time is not an unlimited dimension",
+    ],
+)
+def test_missing_record_dimension_detection(output):
+    error = subprocess.CalledProcessError(1, ["ncrcat"], output=output)
+
+    assert looks_like_missing_record_dimension(error)
+
+
+def test_missing_record_dimension_detection_rejects_other_failures():
+    error = subprocess.CalledProcessError(
+        1, ["ncrcat"], output="No space left on device"
+    )
+
+    assert not looks_like_missing_record_dimension(error)
+
+
+def test_execute_slice_job_retries_ncrcat_with_record_dimension_chunks(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("OUTPUT_DIR", str(tmp_path))
+    monkeypatch.setenv("NCPARTITIONER_CHUNK_BYTES", "64")
+    request_args = {
+        "basename": "tasmax",
+        "dirname": "tests/data",
+        "extension": "nc",
+        "timestamp": 103,
+        "variable": "tasmax",
+        "time": (0, 4),
+        "lat": (0, 1),
+        "lon": (0, 3),
+    }
+    job_id = "record-fallback-job"
+    os.makedirs(os.path.join(str(tmp_path), ".jobs", job_id), exist_ok=True)
+    write_running_status(tmp_path, job_id)
+    ncrcat_calls = []
+    conversion_calls = []
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "ncks":
+            os.makedirs(os.path.dirname(cmd[-1]), exist_ok=True)
+            with open(cmd[-1], "w", encoding="utf-8") as handle:
+                handle.write("chunk")
+            if "--mk_rec_dmn" in cmd:
+                conversion_calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        ncrcat_calls.append(cmd)
+        if len(ncrcat_calls) == 1:
+            raise subprocess.CalledProcessError(1, cmd, output="no record dimension")
+        with open(cmd[-1], "w", encoding="utf-8") as handle:
+            handle.write("final")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    with patch("ncpartitioner.response.subprocess.run", side_effect=fake_run):
+        execute_slice_job(job_id, request_args)
+
+    payload = read_job_status(job_id)
+    assert payload["status"] == "complete"
+    assert len(ncrcat_calls) == 2
+    assert conversion_calls
+    assert all("--mk_rec_dmn" in call for call in conversion_calls)
+    assert all("record_chunk_" in path for path in ncrcat_calls[1][7:-1])
+
+
+def test_execute_slice_job_does_not_retry_unrelated_ncrcat_failure(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("OUTPUT_DIR", str(tmp_path))
+    monkeypatch.setenv("NCPARTITIONER_CHUNK_BYTES", "64")
+    request_args = {
+        "basename": "tasmax",
+        "dirname": "tests/data",
+        "extension": "nc",
+        "timestamp": 104,
+        "variable": "tasmax",
+        "time": (0, 4),
+        "lat": (0, 1),
+        "lon": (0, 3),
+    }
+    job_id = "non-record-fallback-job"
+    os.makedirs(os.path.join(str(tmp_path), ".jobs", job_id), exist_ok=True)
+    write_running_status(tmp_path, job_id)
+    conversion_calls = []
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "ncks":
+            os.makedirs(os.path.dirname(cmd[-1]), exist_ok=True)
+            with open(cmd[-1], "w", encoding="utf-8") as handle:
+                handle.write("chunk")
+            if "--mk_rec_dmn" in cmd:
+                conversion_calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        raise subprocess.CalledProcessError(1, cmd, output="No space left on device")
+
+    with patch("ncpartitioner.response.subprocess.run", side_effect=fake_run):
+        execute_slice_job(job_id, request_args)
+
+    payload = read_job_status(job_id)
+    assert payload["status"] == "failed"
+    assert (
+        payload["error"]
+        == "Subset assembly failed. Try a smaller time or spatial range."
+    )
+    assert conversion_calls == []
 
 
 @pytest.mark.parametrize("unlimited_time", [False, True])
