@@ -23,6 +23,7 @@ To do end-to-end testing, you will also need a THREDDS instance running on your 
 * `NCPARTITIONER_MAX_WORKERS` - optional maximum number of chunk extraction workers; defaults to `1`. Increase cautiously because each worker runs its own `ncks` process.
 * `NCPARTITIONER_DEFLATE_LEVEL` - optional netCDF4 compression level passed to the final `ncrcat -L`; defaults to `1`.
 * `NCPARTITIONER_NCRCAT_THREADS` - optional thread count passed to final `ncrcat -t`; defaults to `1`. Increase only after measuring because higher values can increase CPU and IO contention.
+* `NCPARTITIONER_QUEUE_IDLE_TTL_SECONDS` - optional queued-job heartbeat timeout. A queued job that is not polled via `status_url` within this many seconds is failed and discarded; defaults to `300`.
 
 Run with flask:
 ```
@@ -77,6 +78,13 @@ The frontend should poll `status_url` until it receives a terminal job state. Cu
 * `complete`
 * `failed`
 
+Queued jobs now carry two timestamps:
+
+* `queued_at` - when the job entered the Dragonfly-backed queue
+* `last_seen_at` - refreshed on each `status_url` poll while the job is still queued
+
+If a queued job is not polled within `NCPARTITIONER_QUEUE_IDLE_TTL_SECONDS`, it is treated as abandoned, failed, and removed from Dragonfly instead of lingering indefinitely.
+
 Running jobs may include progress fields:
 
 * `phase` - current processing phase, currently `extracting` or `merging`
@@ -90,9 +98,10 @@ Chunking notes:
 
 * Large requests are split into multiple time windows based on `NCPARTITIONER_CHUNK_BYTES`
 * Chunk extraction runs in parallel up to `NCPARTITIONER_MAX_WORKERS`
-* Intermediate chunks are written to temporary files with plain `ncks` subsetting, preserving the source output behavior. The chunk step does not force `-4`, `-L`, or `--mk_rec_dmn time`.
-* Completed chunks are concatenated in time order with a single final `ncrcat`, which applies `NCPARTITIONER_DEFLATE_LEVEL`
-* If the first `ncrcat` fails because chunks are not record-dimension files, the job converts chunk copies with `ncks --mk_rec_dmn time` and retries `ncrcat`
+* Intermediate chunks are written to temporary files with `ncks` subsetting and chunk compression (`-4 -L <level>`), where the level preserves the source deflate level when present and otherwise uses `NCPARTITIONER_DEFLATE_LEVEL`
+* If the source file does not already use an unlimited `time` dimension, the chunk step adds `--mk_rec_dmn time`
+* Completed chunks are concatenated in time order with a single final `ncrcat`
+* If the first `ncrcat` still fails because chunks are not record-dimension files, the job converts chunk copies with `ncks --mk_rec_dmn time` and retries `ncrcat`
 * NCO internal temp files are disabled with `--no_tmp_fl` because all chunk and final-merge output is already written under job-scoped `.jobs/<job_id>` paths before publication
 * `NCPARTITIONER_CHUNK_BYTES` is a per-chunk target, not a per-time-index target
 * Approximate in-flight slice memory is `NCPARTITIONER_CHUNK_BYTES * NCPARTITIONER_MAX_WORKERS`, plus process and netCDF/NCO overhead

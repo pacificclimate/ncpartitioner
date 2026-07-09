@@ -225,6 +225,13 @@ def test_execute_slice_job_reports_chunk_progress_during_merge(tmp_path, monkeyp
     expected_chunks = len(time_windows(request_args))
 
     def fake_run(cmd, **kwargs):
+        if cmd[0] == "ncdump":
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                "netcdf tasmax { dimensions: time = UNLIMITED ; variables: float tasmax(time, lat, lon) ; tasmax:_DeflateLevel = 1 ; }",
+                "",
+            )
         if cmd[0] == "ncks":
             os.makedirs(os.path.dirname(cmd[-1]), exist_ok=True)
             with open(cmd[-1], "w", encoding="utf-8") as handle:
@@ -286,7 +293,7 @@ def test_default_max_workers_is_one():
     assert DEFAULT_MAX_WORKERS == 1
 
 
-def test_slice_command_uses_source_format_without_intermediate_deflate():
+def test_slice_command_applies_chunk_deflate_level():
     request_args = {
         "variable": "tasmax",
         "time": (0, 2),
@@ -294,13 +301,16 @@ def test_slice_command_uses_source_format_without_intermediate_deflate():
         "lon": (0, 1),
     }
 
-    command = slice_command(request_args, "/input.nc", "/chunk.nc", 0, 1)
+    command = slice_command(request_args, "/input.nc", "/chunk.nc", 0, 1, 2)
 
     assert command == [
         "ncks",
         "-O",
         "-h",
         "--no_tmp_fl",
+        "-4",
+        "-L",
+        "2",
         "-v",
         "tasmax",
         "-d",
@@ -312,8 +322,6 @@ def test_slice_command_uses_source_format_without_intermediate_deflate():
         "/input.nc",
         "/chunk.nc",
     ]
-    assert "-4" not in command
-    assert "-L" not in command
     assert "--mk_rec_dmn" not in command
 
 
@@ -341,8 +349,6 @@ def test_concat_command_applies_final_deflate_level(monkeypatch):
         "-h",
         "--no_tmp_fl",
         "-4",
-        "-L",
-        "2",
         "/chunk_0000.nc",
         "/chunk_0001.nc",
         "/final.nc",
@@ -409,6 +415,13 @@ def test_execute_slice_job_retries_ncrcat_with_record_dimension_chunks(
     conversion_calls = []
 
     def fake_run(cmd, **kwargs):
+        if cmd[0] == "ncdump":
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                "netcdf tasmax { dimensions: time = 5 ; variables: float tasmax(time, lat, lon) ; }",
+                "",
+            )
         if cmd[0] == "ncks":
             os.makedirs(os.path.dirname(cmd[-1]), exist_ok=True)
             with open(cmd[-1], "w", encoding="utf-8") as handle:
@@ -432,7 +445,10 @@ def test_execute_slice_job_retries_ncrcat_with_record_dimension_chunks(
     assert len(ncrcat_calls) == 2
     assert conversion_calls
     assert all("--mk_rec_dmn" in call for call in conversion_calls)
-    assert all("record_chunk_" in path for path in ncrcat_calls[1][7:-1])
+    assert any("record_chunk_" in call[-1] for call in conversion_calls)
+    retry_chunk_paths = [path for path in ncrcat_calls[1][1:-1] if path.endswith(".nc")]
+    assert retry_chunk_paths
+    assert all("record_chunk_" in path for path in retry_chunk_paths)
 
 
 def test_execute_slice_job_does_not_retry_unrelated_ncrcat_failure(
@@ -456,6 +472,13 @@ def test_execute_slice_job_does_not_retry_unrelated_ncrcat_failure(
     conversion_calls = []
 
     def fake_run(cmd, **kwargs):
+        if cmd[0] == "ncdump":
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                "netcdf tasmax { dimensions: time = UNLIMITED ; variables: float tasmax(time, lat, lon) ; }",
+                "",
+            )
         if cmd[0] == "ncks":
             os.makedirs(os.path.dirname(cmd[-1]), exist_ok=True)
             with open(cmd[-1], "w", encoding="utf-8") as handle:

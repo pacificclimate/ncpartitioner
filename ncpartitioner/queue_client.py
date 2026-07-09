@@ -73,6 +73,20 @@ def queue_length():
     return get_client().llen(QUEUE_KEY)
 
 
+def discard_queued_job(job_id):
+    """Remove a queued job id and its args payload if they still exist.
+
+    Returns True only when the job id was still present in the queue and was
+    removed by this call.
+    """
+    client = get_client()
+    removed = client.lrem(QUEUE_KEY, 0, job_id)
+    if removed <= 0:
+        return False
+    client.delete(_job_args_key(job_id))
+    return True
+
+
 def dequeue_slice_job(timeout=0):
     """Blocking pop from the head of the queue. Returns (job_id, args) or
     (None, None) if `timeout` elapses with nothing queued (timeout=0 blocks

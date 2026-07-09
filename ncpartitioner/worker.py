@@ -36,18 +36,29 @@ POLL_TIMEOUT_SECONDS = 5
 
 
 def run_one_job(job_id, args):
+    existing = response.read_job_status(job_id) or {}
+    stale_reason = response.queued_job_stale_reason(existing)
+    if stale_reason is not None:
+        logger.info("Dropping stale queued job %s: %s", job_id, stale_reason)
+        response.fail_job_from_status_payload(job_id, existing, stale_reason)
+        return
+
     if args is None:
         logger.warning(
             "Job %s popped from queue but its args were missing (TTL'd out?) "
             "-- marking failed without running.",
             job_id,
         )
-        response.fail_job(job_id, {}, "Job args expired before processing")
+        if existing:
+            response.fail_job_from_status_payload(
+                job_id, existing, "Job args expired before processing"
+            )
+        else:
+            response.fail_job(job_id, {}, "Job args expired before processing")
         return
 
     logger.info("Picked up job %s", job_id)
-    existing = response.read_job_status(job_id)
-    started_at = (existing or {}).get("started_at") or response.utcnow_iso()
+    started_at = existing.get("started_at") or response.utcnow_iso()
     response.write_job_status(
         job_id,
         response.build_job_status(job_id, args, "running", started_at=started_at),

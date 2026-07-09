@@ -98,6 +98,15 @@ def build_job_status(job_id, args, status, **extra):
     return payload
 
 
+def parse_iso8601(value):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
 def write_job_status(job_id, payload):
     ensure_jobs_dir()
     with job_lock(job_id):
@@ -127,6 +136,47 @@ def write_running_job_status(job_id, args, **extra):
             **extra,
         ),
     )
+
+
+def queue_idle_ttl_seconds():
+    return int(os.getenv("NCPARTITIONER_QUEUE_IDLE_TTL_SECONDS", 5 * 60))
+
+
+def queued_job_stale_reason(payload, now=None):
+    if payload.get("status") != "queued":
+        return None
+
+    now = now or datetime.now(timezone.utc)
+    queued_at = parse_iso8601(payload.get("queued_at"))
+    last_seen_at = parse_iso8601(payload.get("last_seen_at")) or queued_at
+    if last_seen_at is not None:
+        idle_seconds = (now - last_seen_at).total_seconds()
+        if idle_seconds > queue_idle_ttl_seconds():
+            return "Queued job was abandoned before processing"
+
+    return None
+
+
+def fail_job_from_status_payload(job_id, payload, error, *, returncode=None):
+    write_job_status(
+        job_id,
+        {
+            **payload,
+            "status": "failed",
+            "updated_at": utcnow_iso(),
+            "completed_at": utcnow_iso(),
+            "error": error,
+            "returncode": returncode,
+        },
+    )
+    cleanup_job_temp_dir(job_id)
+
+
+def fail_and_discard_queued_job(job_id, payload, error):
+    if not queue_client.discard_queued_job(job_id):
+        return False
+    fail_job_from_status_payload(job_id, payload, error)
+    return True
 
 
 def status_url(job_id):
@@ -171,23 +221,82 @@ def ncrcat_threads():
     return max(1, int(os.getenv("NCPARTITIONER_NCRCAT_THREADS", 1)))
 
 
-def slice_command(args, source_filepath, destination, time_start, time_end):
-    return [
+def inspect_source(source_filepath, variable):
+    """Read the source file's header (a single `ncdump -hs`) to determine
+    whether `time` is already the record (UNLIMITED) dimension and what
+    deflate level the variable is already stored at.
+    """
+    is_unlimited = False
+    level = 0
+    try:
+        result = subprocess.run(
+            ["ncdump", "-hs", source_filepath],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=True,
+        )
+        output = result.stdout or ""
+        is_unlimited = "UNLIMITED" in output
+
+        marker = f"{variable}:_DeflateLevel"
+        for line in output.splitlines():
+            stripped = line.strip()
+            if stripped.startswith(marker):
+                try:
+                    level = int(stripped.split("=")[1].strip().rstrip(" ;"))
+                except (IndexError, ValueError):
+                    level = 0
+                break
+    except (subprocess.CalledProcessError, OSError):
+        is_unlimited = False
+        level = 0
+
+    return is_unlimited, level
+
+
+def chunk_deflate_level(source_deflate, target_deflate):
+    """Compression level to force on every chunk during slicing.
+    Preserves the source's existing level if it has one.
+    """
+    return source_deflate if source_deflate > 0 else target_deflate
+
+
+def slice_command(
+    args,
+    source_filepath,
+    destination,
+    time_start,
+    time_end,
+    chunk_level,
+    add_record_dimension=False,
+):
+    command = [
         "ncks",
         "-O",
         "-h",
         "--no_tmp_fl",
-        "-v",
-        f"{args['variable']}",
-        "-d",
-        f"time,{time_start},{time_end}",
-        "-d",
-        f"lat,{args['lat'][0]},{args['lat'][1]}",
-        "-d",
-        f"lon,{args['lon'][0]},{args['lon'][1]}",
-        source_filepath,
-        destination,
+        "-4",
+        "-L",
+        str(chunk_level),
     ]
+    if add_record_dimension:
+        command.extend(["--mk_rec_dmn", "time"])
+    command.extend(
+        [
+            "-v",
+            f"{args['variable']}",
+            "-d",
+            f"time,{time_start},{time_end}",
+            "-d",
+            f"lat,{args['lat'][0]},{args['lat'][1]}",
+            "-d",
+            f"lon,{args['lon'][0]},{args['lon'][1]}",
+            source_filepath,
+            destination,
+        ]
+    )
+    return command
 
 
 def record_chunk_output_filepath(job_id, index):
@@ -214,8 +323,6 @@ def concat_command(chunk_paths, destination):
         "-h",
         "--no_tmp_fl",
         "-4",
-        "-L",
-        str(deflate_level()),
     ]
     threads = ncrcat_threads()
     if threads > 1:
@@ -365,18 +472,29 @@ def concat_chunks_with_fallback(job_id, args, chunk_paths, destination):
         ncrcat_fallback=True,
     )
 
-    converted_paths = []
+    converted_paths = [None] * len(chunk_paths)
     conversion_messages = []
-    for index, chunk_path in enumerate(chunk_paths):
-        converted_path = record_chunk_output_filepath(job_id, index)
-        stderr = run_subprocess_step(
-            job_id, args, make_record_dimension_command(chunk_path, converted_path)
-        )
-        if stderr is _STEP_FAILED:
-            return _STEP_FAILED
-        if stderr:
-            conversion_messages.append(stderr)
-        converted_paths.append(converted_path)
+    workers = max_workers(len(chunk_paths))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(
+                run_subprocess_step,
+                job_id,
+                args,
+                make_record_dimension_command(
+                    chunk_path, record_chunk_output_filepath(job_id, index)
+                ),
+            ): index
+            for index, chunk_path in enumerate(chunk_paths)
+        }
+        for future in concurrent.futures.as_completed(futures):
+            index = futures[future]
+            stderr = future.result()
+            if stderr is _STEP_FAILED:
+                return _STEP_FAILED
+            if stderr:
+                conversion_messages.append(stderr)
+            converted_paths[index] = record_chunk_output_filepath(job_id, index)
 
     retry_command = concat_command(converted_paths, destination)
     success, stderr, retry_exc = try_subprocess_step(job_id, retry_command)
@@ -407,13 +525,21 @@ def execute_slice_job(job_id, args):
     stderr_messages = []
     job_started = monotonic()
 
+    source_is_unlimited, source_level = inspect_source(
+        source_filepath, args["variable"]
+    )
+    needs_record_dimension = not source_is_unlimited
+    chunk_level = chunk_deflate_level(source_level, deflate_level())
+
     logger.info(
-        "Slice job %s extracting %s chunks with %s workers; chunk_byte_budget=%s final_deflate_level=%s",
+        "Slice job %s extracting %s chunks with %s workers; chunk_byte_budget=%s "
+        "chunk_deflate_level=%s needs_record_dimension=%s",
         job_id,
         len(windows),
         workers,
         chunk_byte_budget(),
-        deflate_level(),
+        chunk_level,
+        needs_record_dimension,
     )
     write_running_job_status(
         job_id,
@@ -428,7 +554,15 @@ def execute_slice_job(job_id, args):
         stderr = run_subprocess_step(
             job_id,
             args,
-            slice_command(args, source_filepath, chunk_path, time_start, time_end),
+            slice_command(
+                args,
+                source_filepath,
+                chunk_path,
+                time_start,
+                time_end,
+                chunk_level,
+                add_record_dimension=needs_record_dimension,
+            ),
         )
         return index, chunk_path, stderr
 
@@ -538,6 +672,8 @@ def slice(args):
         args,
         "queued",
         started_at=None,
+        queued_at=utcnow_iso(),
+        last_seen_at=utcnow_iso(),
     )
     write_job_status(job_id, payload)
 
@@ -572,6 +708,21 @@ def slice_status(job_id):
         return response_json({"status": "not_found", "job_id": job_id}, status=404)
 
     if payload.get("status") == "queued":
+        stale_reason = queued_job_stale_reason(payload)
+        if stale_reason is not None:
+            if fail_and_discard_queued_job(job_id, payload, stale_reason):
+                return response_json(read_job_status(job_id), status=200)
+            latest_payload = read_job_status(job_id)
+            if latest_payload is not None:
+                return response_json(latest_payload, status=200)
+            return response_json({"status": "not_found", "job_id": job_id}, status=404)
+
+        payload = {
+            **payload,
+            "last_seen_at": utcnow_iso(),
+            "updated_at": utcnow_iso(),
+        }
+        write_job_status(job_id, payload)
         position = queue_client.queue_position(job_id)
         if position is not None:
             payload = {**payload, "queue_position": position}
