@@ -19,9 +19,10 @@ To do end-to-end testing, you will also need a THREDDS instance running on your 
 * `THREDDS_DAP_BASE` - the base URL for the THREDDS openDAP server (probably ends /dodsC): used to fulfill metadata requests
 * `DATA_ROOT` - directory under which all data is found; prevents files outside the directory from being served
 * `NCPARTITIONER_CHUNK_BYTES` - optional target size, in bytes, for each time-window slice job; defaults to `1073741824` (1 GiB). Smaller values reduce per-`ncks` memory pressure but create more chunks.
-* `NCPARTITIONER_BYTES_PER_ELEMENT` - optional byte estimate used by the chunk planner; defaults to `4`.
+* `NCPARTITIONER_BYTES_PER_ELEMENT` - optional byte estimate used by the chunk planner. When unset, the planner inspects the source variable type from `ncdump -hs` and falls back to `4` only when that inspection fails.
 * `NCPARTITIONER_MAX_WORKERS` - optional maximum number of chunk extraction workers; defaults to `1`. Increase cautiously because each worker runs its own `ncks` process.
 * `NCPARTITIONER_DEFLATE_LEVEL` - optional netCDF4 compression level passed to the final `ncrcat -L`; defaults to `1`.
+* `NCPARTITIONER_COMPRESS_INTERMEDIATE_CHUNKS` - optional strict boolean toggle for intermediate chunk compression. Defaults to `false`. Accepted values are exactly `true` or `false`. When `false`, scratch chunks are written uncompressed and compression is applied only at final merge.
 * `NCPARTITIONER_NCRCAT_THREADS` - optional thread count passed to final `ncrcat -t`; defaults to `1`. Increase only after measuring because higher values can increase CPU and IO contention.
 * `NCPARTITIONER_QUEUE_IDLE_TTL_SECONDS` - optional queued-job heartbeat timeout. A queued job that is not polled via `status_url` within this many seconds is failed and discarded; defaults to `300`.
 
@@ -98,13 +99,14 @@ Chunking notes:
 
 * Large requests are split into multiple time windows based on `NCPARTITIONER_CHUNK_BYTES`
 * Chunk extraction runs in parallel up to `NCPARTITIONER_MAX_WORKERS`
-* Intermediate chunks are written to temporary files with `ncks` subsetting and chunk compression (`-4 -L <level>`), where the level preserves the source deflate level when present and otherwise uses `NCPARTITIONER_DEFLATE_LEVEL`
+* By default, intermediate chunks are written uncompressed and the final `ncrcat` applies `NCPARTITIONER_DEFLATE_LEVEL` once when creating the output file
+* If `NCPARTITIONER_COMPRESS_INTERMEDIATE_CHUNKS=true`, intermediate chunks are written with `ncks` subsetting and chunk compression (`-4 -L <level>`), where the level preserves the source deflate level when present and otherwise uses `NCPARTITIONER_DEFLATE_LEVEL`
 * If the source file does not already use an unlimited `time` dimension, the chunk step adds `--mk_rec_dmn time`
 * Completed chunks are concatenated in time order with a single final `ncrcat`
 * If the first `ncrcat` still fails because chunks are not record-dimension files, the job converts chunk copies with `ncks --mk_rec_dmn time` and retries `ncrcat`
 * NCO internal temp files are disabled with `--no_tmp_fl` because all chunk and final-merge output is already written under job-scoped `.jobs/<job_id>` paths before publication
 * `NCPARTITIONER_CHUNK_BYTES` is a per-chunk target, not a per-time-index target
 * Approximate in-flight slice memory is `NCPARTITIONER_CHUNK_BYTES * NCPARTITIONER_MAX_WORKERS`, plus process and netCDF/NCO overhead
-* The chunk planner estimates bytes from `lat * lon * NCPARTITIONER_BYTES_PER_ELEMENT`; it does not account for metadata, coordinates, associated variables, or compression ratio
+* The chunk planner estimates bytes from `lat * lon * bytes_per_element`, where `bytes_per_element` comes from the inspected source variable type unless overridden by `NCPARTITIONER_BYTES_PER_ELEMENT`
 
 Note that the variable is always trimmed to the hyperslab specified in the dimensions portion of the `targets` attribute; if the variable portion of the `targets` attribute is different, it will be overruled.
