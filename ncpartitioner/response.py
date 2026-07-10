@@ -11,7 +11,6 @@ import concurrent.futures
 import json
 import logging
 import os
-import re
 import shutil
 import subprocess
 import threading
@@ -238,22 +237,59 @@ def deflate_level():
 
 
 def compress_intermediate_chunks():
-    value = os.getenv("NCPARTITIONER_COMPRESS_INTERMEDIATE_CHUNKS")
-    if value is None:
-        return False
+    return os.getenv("NCPARTITIONER_COMPRESS_INTERMEDIATE_CHUNKS") == "true"
 
-    if value == "true":
-        return True
-    if value == "false":
-        return False
-    raise ValueError(
-        "NCPARTITIONER_COMPRESS_INTERMEDIATE_CHUNKS must be exactly "
-        "'true' or 'false'"
-    )
+
+def compress_final_output():
+    return os.getenv("NCPARTITIONER_COMPRESS_FINAL_OUTPUT") == "true"
 
 
 def ncrcat_threads():
     return max(1, int(os.getenv("NCPARTITIONER_NCRCAT_THREADS", 1)))
+
+
+def chunk_cache_bytes():
+    """HDF5 per-variable chunk cache size (bytes) for generated netCDF4
+    files. NCO's default cache is only a few MB, which is far too small
+    for our chunk sizes and causes cache thrashing on large files.
+    """
+    return int(os.getenv("NCPARTITIONER_CNK_CSH_BYTES", 512 * 1024 * 1024))
+
+
+def record_dimension_chunk_size():
+    """Time-dimension chunk size for generated netCDF4 files."""
+    return int(os.getenv("NCPARTITIONER_CNK_TIME_SIZE", 1))
+
+
+def generated_file_chunking_flags(args):
+    lat0, lat1 = args["lat"]
+    lon0, lon1 = args["lon"]
+    return [
+        "--cnk_plc",
+        "g3d",
+        "--cnk_csh",
+        str(chunk_cache_bytes()),
+        "--cnk_dmn",
+        f"time,{record_dimension_chunk_size()}",
+        "--cnk_dmn",
+        f"lat,{lat1 - lat0 + 1}",
+        "--cnk_dmn",
+        f"lon,{lon1 - lon0 + 1}",
+    ]
+
+
+def source_variable_bytes_from_header(header, variable):
+    declaration_prefix = f"{variable}("
+    for line in header.splitlines():
+        stripped = line.strip()
+        if not stripped.endswith(";") or declaration_prefix not in stripped:
+            continue
+        left_side = stripped.split("(", 1)[0].strip()
+        parts = left_side.split()
+        if len(parts) != 2 or parts[1] != variable:
+            continue
+        return NETCDF_TYPE_BYTES.get(parts[0], DEFAULT_BYTES_PER_ELEMENT)
+    return DEFAULT_BYTES_PER_ELEMENT
 
 
 def inspect_source(source_filepath, variable):
@@ -276,15 +312,7 @@ def inspect_source(source_filepath, variable):
         output = result.stdout or ""
         is_unlimited = "UNLIMITED" in output
 
-        type_match = re.search(
-            rf"^\s*(\w+)\s+{re.escape(variable)}\s*\(",
-            output,
-            flags=re.MULTILINE,
-        )
-        if type_match:
-            variable_bytes = NETCDF_TYPE_BYTES.get(
-                type_match.group(1), DEFAULT_BYTES_PER_ELEMENT
-            )
+        variable_bytes = source_variable_bytes_from_header(output, variable)
 
         marker = f"{variable}:_DeflateLevel"
         for line in output.splitlines():
@@ -324,9 +352,11 @@ def slice_command(
         "-O",
         "-h",
         "--no_tmp_fl",
+        "-4",
     ]
+    command.extend(generated_file_chunking_flags(args))
     if chunk_level is not None:
-        command.extend(["-4", "-L", str(chunk_level)])
+        command.extend(["-L", str(chunk_level)])
     if add_record_dimension:
         command.extend(["--mk_rec_dmn", "time"])
     command.extend(
@@ -350,20 +380,24 @@ def record_chunk_output_filepath(job_id, index):
     return os.path.join(job_temp_dir(job_id), f"record_chunk_{index:04d}.nc")
 
 
-def make_record_dimension_command(source, destination):
-    return [
+def make_record_dimension_command(source, destination, args, chunk_level=None):
+    command = [
         "ncks",
         "-O",
         "-h",
         "--no_tmp_fl",
+        "-4",
         "--mk_rec_dmn",
         "time",
-        source,
-        destination,
     ]
+    command.extend(generated_file_chunking_flags(args))
+    if chunk_level is not None:
+        command.extend(["-L", str(chunk_level)])
+    command.extend([source, destination])
+    return command
 
 
-def concat_command(chunk_paths, destination, final_level=None):
+def concat_command(chunk_paths, destination, args, final_level=None):
     command = [
         "ncrcat",
         "-O",
@@ -373,6 +407,8 @@ def concat_command(chunk_paths, destination, final_level=None):
     ]
     if final_level is not None:
         command.extend(["-L", str(final_level)])
+    command.extend(generated_file_chunking_flags(args))
+
     threads = ncrcat_threads()
     if threads > 1:
         command.extend(["-t", str(threads)])
@@ -493,8 +529,10 @@ def total_file_size(paths):
     return sum(os.path.getsize(path) for path in paths if os.path.exists(path))
 
 
-def concat_chunks_with_fallback(job_id, args, chunk_paths, destination, final_level=None):
-    command = concat_command(chunk_paths, destination, final_level=final_level)
+def concat_chunks_with_fallback(
+    job_id, args, chunk_paths, destination, chunk_level=None, final_level=None
+):
+    command = concat_command(chunk_paths, destination, args, final_level=final_level)
     success, stderr, exc = try_subprocess_step(job_id, command)
     if success:
         return [stderr] if stderr else []
@@ -531,7 +569,10 @@ def concat_chunks_with_fallback(job_id, args, chunk_paths, destination, final_le
                 job_id,
                 args,
                 make_record_dimension_command(
-                    chunk_path, record_chunk_output_filepath(job_id, index)
+                    chunk_path,
+                    record_chunk_output_filepath(job_id, index),
+                    args,
+                    chunk_level,
                 ),
             ): index
             for index, chunk_path in enumerate(chunk_paths)
@@ -546,7 +587,7 @@ def concat_chunks_with_fallback(job_id, args, chunk_paths, destination, final_le
             converted_paths[index] = record_chunk_output_filepath(job_id, index)
 
     retry_command = concat_command(
-        converted_paths, destination, final_level=final_level
+        converted_paths, destination, args, final_level=final_level
     )
     success, stderr, retry_exc = try_subprocess_step(job_id, retry_command)
     if not success:
@@ -580,12 +621,8 @@ def execute_slice_job(job_id, args):
     job_started = monotonic()
     needs_record_dimension = not source_is_unlimited
     source_compression_level = chunk_deflate_level(source_level, deflate_level())
-    chunk_level = (
-        source_compression_level if compress_intermediate_chunks() else None
-    )
-    final_level = (
-        None if compress_intermediate_chunks() else source_compression_level
-    )
+    chunk_level = source_compression_level if compress_intermediate_chunks() else None
+    final_level = source_compression_level if compress_final_output() else None
 
     logger.info(
         "Slice job %s extracting %s chunks with %s workers; chunk_byte_budget=%s "
@@ -681,7 +718,12 @@ def execute_slice_job(job_id, args):
         chunk_bytes=chunk_bytes,
     )
     merge_messages = concat_chunks_with_fallback(
-        job_id, args, ordered_chunk_paths, temp_final_path, final_level=final_level
+        job_id,
+        args,
+        ordered_chunk_paths,
+        temp_final_path,
+        chunk_level=chunk_level,
+        final_level=final_level,
     )
     if merge_messages is _STEP_FAILED:
         return

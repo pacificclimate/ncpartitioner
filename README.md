@@ -22,7 +22,8 @@ To do end-to-end testing, you will also need a THREDDS instance running on your 
 * `NCPARTITIONER_BYTES_PER_ELEMENT` - optional byte estimate used by the chunk planner. When unset, the planner inspects the source variable type from `ncdump -hs` and falls back to `4` only when that inspection fails.
 * `NCPARTITIONER_MAX_WORKERS` - optional maximum number of chunk extraction workers; defaults to `1`. Increase cautiously because each worker runs its own `ncks` process.
 * `NCPARTITIONER_DEFLATE_LEVEL` - optional netCDF4 compression level passed to the final `ncrcat -L`; defaults to `1`.
-* `NCPARTITIONER_COMPRESS_INTERMEDIATE_CHUNKS` - optional strict boolean toggle for intermediate chunk compression. Defaults to `false`. Accepted values are exactly `true` or `false`. When `false`, scratch chunks are written uncompressed and compression is applied only at final merge.
+* `NCPARTITIONER_COMPRESS_INTERMEDIATE_CHUNKS` - optional toggle for intermediate chunk compression. Defaults to `false`. Only the literal value `true` enables intermediate compression.
+* `NCPARTITIONER_COMPRESS_FINAL_OUTPUT` - optional toggle for final output compression. Defaults to `false`. Only the literal value `true` enables `ncrcat -L`.
 * `NCPARTITIONER_NCRCAT_THREADS` - optional thread count passed to final `ncrcat -t`; defaults to `1`. Increase only after measuring because higher values can increase CPU and IO contention.
 * `NCPARTITIONER_QUEUE_IDLE_TTL_SECONDS` - optional queued-job heartbeat timeout. A queued job that is not polled via `status_url` within this many seconds is failed and discarded; defaults to `300`.
 
@@ -99,8 +100,9 @@ Chunking notes:
 
 * Large requests are split into multiple time windows based on `NCPARTITIONER_CHUNK_BYTES`
 * Chunk extraction runs in parallel up to `NCPARTITIONER_MAX_WORKERS`
-* By default, intermediate chunks are written uncompressed and the final `ncrcat` applies `NCPARTITIONER_DEFLATE_LEVEL` once when creating the output file
+* By default, both intermediate chunks and final output are written without explicit deflate compression
 * If `NCPARTITIONER_COMPRESS_INTERMEDIATE_CHUNKS=true`, intermediate chunks are written with `ncks` subsetting and chunk compression (`-4 -L <level>`), where the level preserves the source deflate level when present and otherwise uses `NCPARTITIONER_DEFLATE_LEVEL`
+* If `NCPARTITIONER_COMPRESS_FINAL_OUTPUT=true`, the final `ncrcat` applies `NCPARTITIONER_DEFLATE_LEVEL` once when creating the output file
 * If the source file does not already use an unlimited `time` dimension, the chunk step adds `--mk_rec_dmn time`
 * Completed chunks are concatenated in time order with a single final `ncrcat`
 * If the first `ncrcat` still fails because chunks are not record-dimension files, the job converts chunk copies with `ncks --mk_rec_dmn time` and retries `ncrcat`

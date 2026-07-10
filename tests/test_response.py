@@ -21,6 +21,7 @@ from ncpartitioner.response import (
     read_job_status,
     slice,
     slice_command,
+    source_variable_bytes_from_header,
     dds,
     das,
     time_windows,
@@ -83,6 +84,18 @@ def write_running_status(output_dir, job_id):
         handle.write(
             f'{{"job_id":"{job_id}","status":"running","status_url":"partition/status/{job_id}","download_url":"x","output_filename":"y","started_at":"2026-01-01T00:00:00+00:00"}}'
         )
+
+
+def assert_generated_chunking_flags(command):
+    assert "-4" in command
+    assert "--cnk_plc" in command
+    assert command[command.index("--cnk_plc") + 1] == "g3d"
+    assert "--cnk_csh" in command
+    assert command[command.index("--cnk_csh") + 1] == str(512 * 1024 * 1024)
+    assert command.count("--cnk_dmn") == 3
+    assert "time,1" in command
+    assert "lat,2" in command
+    assert "lon,2" in command
 
 
 def test_dds():
@@ -303,6 +316,23 @@ def test_chunk_byte_budget_defaults_to_one_gib(monkeypatch):
     assert chunk_byte_budget() == 1024 * 1024 * 1024
 
 
+def test_source_variable_bytes_from_header_parses_short_variable():
+    header = """netcdf chunk_0023 {
+dimensions:
+    lat = 509 ;
+    lon = 1067 ;
+    time = UNLIMITED ; // (144 currently)
+variables:
+    double lat(lat) ;
+    double lon(lon) ;
+    short tasmax(time, lat, lon) ;
+        tasmax:_FillValue = 32767s ;
+    double time(time) ;
+}"""
+
+    assert source_variable_bytes_from_header(header, "tasmax") == 2
+
+
 def test_default_max_workers_is_one():
     assert DEFAULT_MAX_WORKERS == 1
 
@@ -323,6 +353,16 @@ def test_slice_command_applies_chunk_deflate_level():
         "-h",
         "--no_tmp_fl",
         "-4",
+        "--cnk_plc",
+        "g3d",
+        "--cnk_csh",
+        str(512 * 1024 * 1024),
+        "--cnk_dmn",
+        "time,1",
+        "--cnk_dmn",
+        "lat,2",
+        "--cnk_dmn",
+        "lon,2",
         "-L",
         "2",
         "-v",
@@ -354,6 +394,17 @@ def test_slice_command_can_skip_intermediate_compression():
         "-O",
         "-h",
         "--no_tmp_fl",
+        "-4",
+        "--cnk_plc",
+        "g3d",
+        "--cnk_csh",
+        str(512 * 1024 * 1024),
+        "--cnk_dmn",
+        "time,1",
+        "--cnk_dmn",
+        "lat,2",
+        "--cnk_dmn",
+        "lon,2",
         "-v",
         "tasmax",
         "-d",
@@ -372,9 +423,7 @@ def test_execute_slice_job_defaults_to_uncompressed_intermediate_chunks(
 ):
     monkeypatch.setenv("OUTPUT_DIR", str(tmp_path))
     monkeypatch.setenv("NCPARTITIONER_CHUNK_BYTES", "64")
-    monkeypatch.delenv(
-        "NCPARTITIONER_COMPRESS_INTERMEDIATE_CHUNKS", raising=False
-    )
+    monkeypatch.delenv("NCPARTITIONER_COMPRESS_INTERMEDIATE_CHUNKS", raising=False)
     request_args = {
         "basename": "tasmax",
         "dirname": "tests/data",
@@ -415,18 +464,38 @@ def test_execute_slice_job_defaults_to_uncompressed_intermediate_chunks(
     assert payload["status"] == "complete"
     ncks_command = next(cmd for cmd in commands if cmd[0] == "ncks")
     ncrcat_command = next(cmd for cmd in commands if cmd[0] == "ncrcat")
+    assert_generated_chunking_flags(ncks_command)
+    assert_generated_chunking_flags(ncrcat_command)
     assert "-L" not in ncks_command
-    assert "-L" in ncrcat_command
+    assert "-L" not in ncrcat_command
 
 
 def test_make_record_dimension_command():
-    assert make_record_dimension_command("/chunk.nc", "/record_chunk.nc") == [
+    request_args = {
+        "lat": (0, 1),
+        "lon": (0, 1),
+    }
+
+    assert make_record_dimension_command(
+        "/chunk.nc", "/record_chunk.nc", request_args
+    ) == [
         "ncks",
         "-O",
         "-h",
         "--no_tmp_fl",
+        "-4",
         "--mk_rec_dmn",
         "time",
+        "--cnk_plc",
+        "g3d",
+        "--cnk_csh",
+        str(512 * 1024 * 1024),
+        "--cnk_dmn",
+        "time,1",
+        "--cnk_dmn",
+        "lat,2",
+        "--cnk_dmn",
+        "lon,2",
         "/chunk.nc",
         "/record_chunk.nc",
     ]
@@ -434,9 +503,16 @@ def test_make_record_dimension_command():
 
 def test_concat_command_applies_final_deflate_level(monkeypatch):
     monkeypatch.setenv("NCPARTITIONER_DEFLATE_LEVEL", "2")
+    request_args = {
+        "lat": (0, 1),
+        "lon": (0, 1),
+    }
 
     command = concat_command(
-        ["/chunk_0000.nc", "/chunk_0001.nc"], "/final.nc", final_level=2
+        ["/chunk_0000.nc", "/chunk_0001.nc"],
+        "/final.nc",
+        request_args,
+        final_level=2,
     )
 
     assert command == [
@@ -447,6 +523,16 @@ def test_concat_command_applies_final_deflate_level(monkeypatch):
         "-4",
         "-L",
         "2",
+        "--cnk_plc",
+        "g3d",
+        "--cnk_csh",
+        str(512 * 1024 * 1024),
+        "--cnk_dmn",
+        "time,1",
+        "--cnk_dmn",
+        "lat,2",
+        "--cnk_dmn",
+        "lon,2",
         "/chunk_0000.nc",
         "/chunk_0001.nc",
         "/final.nc",
@@ -455,8 +541,12 @@ def test_concat_command_applies_final_deflate_level(monkeypatch):
 
 def test_concat_command_supports_ncrcat_threads(monkeypatch):
     monkeypatch.setenv("NCPARTITIONER_NCRCAT_THREADS", "4")
+    request_args = {
+        "lat": (0, 1),
+        "lon": (0, 1),
+    }
 
-    command = concat_command(["/chunk_0000.nc"], "/final.nc")
+    command = concat_command(["/chunk_0000.nc"], "/final.nc", request_args)
 
     assert "-t" in command
     assert command[command.index("-t") + 1] == "4"
@@ -469,9 +559,7 @@ def test_intermediate_deflate_env_is_not_referenced():
         assert removed_env not in handle.read()
 
 
-def test_execute_slice_job_uses_source_dtype_for_chunk_planning(
-    tmp_path, monkeypatch
-):
+def test_execute_slice_job_uses_source_dtype_for_chunk_planning(tmp_path, monkeypatch):
     monkeypatch.setenv("OUTPUT_DIR", str(tmp_path))
     monkeypatch.setenv("NCPARTITIONER_CHUNK_BYTES", "64")
     monkeypatch.delenv("NCPARTITIONER_BYTES_PER_ELEMENT", raising=False)
@@ -568,11 +656,63 @@ def test_execute_slice_job_can_write_uncompressed_intermediate_chunks(
     assert payload["status"] == "complete"
     ncks_command = next(cmd for cmd in commands if cmd[0] == "ncks")
     ncrcat_command = next(cmd for cmd in commands if cmd[0] == "ncrcat")
+    assert_generated_chunking_flags(ncks_command)
+    assert_generated_chunking_flags(ncrcat_command)
+    assert "-L" not in ncks_command
+    assert "-L" not in ncrcat_command
+
+
+def test_execute_slice_job_can_write_compressed_final_output(tmp_path, monkeypatch):
+    monkeypatch.setenv("OUTPUT_DIR", str(tmp_path))
+    monkeypatch.setenv("NCPARTITIONER_CHUNK_BYTES", "64")
+    monkeypatch.setenv("NCPARTITIONER_COMPRESS_FINAL_OUTPUT", "true")
+    request_args = {
+        "basename": "tasmax",
+        "dirname": "tests/data",
+        "extension": "nc",
+        "timestamp": 110,
+        "variable": "tasmax",
+        "time": (0, 1),
+        "lat": (0, 1),
+        "lon": (0, 1),
+    }
+    job_id = "compressed-final-output-job"
+    os.makedirs(os.path.join(str(tmp_path), ".jobs", job_id), exist_ok=True)
+    write_running_status(tmp_path, job_id)
+    commands = []
+
+    def fake_run(cmd, **kwargs):
+        commands.append(cmd)
+        if cmd[0] == "ncdump":
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                "netcdf tasmax { dimensions: time = UNLIMITED ; variables: float tasmax(time, lat, lon) ; tasmax:_DeflateLevel = 1 ; }",
+                "",
+            )
+        if cmd[0] == "ncks":
+            os.makedirs(os.path.dirname(cmd[-1]), exist_ok=True)
+            with open(cmd[-1], "w", encoding="utf-8") as handle:
+                handle.write("chunk")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        with open(cmd[-1], "w", encoding="utf-8") as handle:
+            handle.write("final")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    with patch("ncpartitioner.response.subprocess.run", side_effect=fake_run):
+        execute_slice_job(job_id, request_args)
+
+    payload = read_job_status(job_id)
+    assert payload["status"] == "complete"
+    ncks_command = next(cmd for cmd in commands if cmd[0] == "ncks")
+    ncrcat_command = next(cmd for cmd in commands if cmd[0] == "ncrcat")
+    assert_generated_chunking_flags(ncks_command)
+    assert_generated_chunking_flags(ncrcat_command)
     assert "-L" not in ncks_command
     assert "-L" in ncrcat_command
 
 
-def test_execute_slice_job_rejects_invalid_intermediate_compression_env(
+def test_execute_slice_job_treats_non_true_intermediate_compression_env_as_false(
     tmp_path, monkeypatch
 ):
     monkeypatch.setenv("OUTPUT_DIR", str(tmp_path))
@@ -587,35 +727,40 @@ def test_execute_slice_job_rejects_invalid_intermediate_compression_env(
         "lat": (0, 1),
         "lon": (0, 1),
     }
-    job_id = "invalid-intermediate-compression-job"
+    job_id = "nontrue-intermediate-compression-job"
     os.makedirs(os.path.join(str(tmp_path), ".jobs", job_id), exist_ok=True)
     write_running_status(tmp_path, job_id)
+    commands = []
 
-    with pytest.raises(ValueError):
+    def fake_run(cmd, **kwargs):
+        commands.append(cmd)
+        if cmd[0] == "ncdump":
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                "netcdf tasmax { dimensions: time = UNLIMITED ; variables: float tasmax(time, lat, lon) ; tasmax:_DeflateLevel = 1 ; }",
+                "",
+            )
+        if cmd[0] == "ncks":
+            os.makedirs(os.path.dirname(cmd[-1]), exist_ok=True)
+            with open(cmd[-1], "w", encoding="utf-8") as handle:
+                handle.write("chunk")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        with open(cmd[-1], "w", encoding="utf-8") as handle:
+            handle.write("final")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    with patch("ncpartitioner.response.subprocess.run", side_effect=fake_run):
         execute_slice_job(job_id, request_args)
 
-
-def test_execute_slice_job_rejects_noncanonical_intermediate_compression_env(
-    tmp_path, monkeypatch
-):
-    monkeypatch.setenv("OUTPUT_DIR", str(tmp_path))
-    monkeypatch.setenv("NCPARTITIONER_COMPRESS_INTERMEDIATE_CHUNKS", "True")
-    request_args = {
-        "basename": "tasmax",
-        "dirname": "tests/data",
-        "extension": "nc",
-        "timestamp": 109,
-        "variable": "tasmax",
-        "time": (0, 1),
-        "lat": (0, 1),
-        "lon": (0, 1),
-    }
-    job_id = "noncanonical-intermediate-compression-job"
-    os.makedirs(os.path.join(str(tmp_path), ".jobs", job_id), exist_ok=True)
-    write_running_status(tmp_path, job_id)
-
-    with pytest.raises(ValueError):
-        execute_slice_job(job_id, request_args)
+    payload = read_job_status(job_id)
+    assert payload["status"] == "complete"
+    ncks_command = next(cmd for cmd in commands if cmd[0] == "ncks")
+    ncrcat_command = next(cmd for cmd in commands if cmd[0] == "ncrcat")
+    assert_generated_chunking_flags(ncks_command)
+    assert_generated_chunking_flags(ncrcat_command)
+    assert "-L" not in ncks_command
+    assert "-L" not in ncrcat_command
 
 
 @pytest.mark.parametrize(
