@@ -70,7 +70,14 @@ def run_one_job(job_id, args):
         # can't kill the worker loop; execute_slice_job already handles its
         # own expected failure modes via fail_job/run_subprocess_step.
         logger.exception("Unhandled exception while running job %s", job_id)
-        response.fail_job(job_id, args, "Unhandled worker exception")
+        try:
+            response.fail_job(job_id, args, "Unhandled worker exception")
+        except Exception:  # noqa: BLE001 -- keep the worker alive even if
+            # the status file itself is corrupted or otherwise unwritable.
+            logger.exception(
+                "Unable to persist failure status for job %s after run error",
+                job_id,
+            )
     else:
         logger.info("Finished job %s", job_id)
 
@@ -89,7 +96,22 @@ def main():
         if job_id is None:
             continue  # timed out with nothing queued, loop back around
 
-        run_one_job(job_id, args)
+        try:
+            run_one_job(job_id, args)
+        except Exception:  # noqa: BLE001 -- last-resort guard around the
+            # entire dispatch path, including the initial status transition
+            # to "running". Without this, one status-write race can kill the
+            # whole worker process and strand the remaining queue.
+            logger.exception("Unhandled exception while dispatching job %s", job_id)
+            if args is None:
+                continue
+            try:
+                response.fail_job(job_id, args, "Unhandled worker exception")
+            except Exception:  # noqa: BLE001 -- log and keep serving
+                logger.exception(
+                    "Unable to persist failure status for job %s after dispatch error",
+                    job_id,
+                )
 
 
 if __name__ == "__main__":

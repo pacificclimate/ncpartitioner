@@ -13,6 +13,7 @@ import logging
 import os
 import shutil
 import subprocess
+import tempfile
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -124,18 +125,70 @@ def parse_iso8601(value):
 def write_job_status(job_id, payload):
     ensure_jobs_dir()
     with job_lock(job_id):
-        temp_path = f"{status_filepath(job_id)}.tmp"
-        with open(temp_path, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle)
-        os.replace(temp_path, status_filepath(job_id))
+        fd, temp_path = tempfile.mkstemp(
+            dir=jobs_dir(),
+            prefix=f"{job_id}.",
+            suffix=".json.tmp",
+            text=True,
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle)
+            os.replace(temp_path, status_filepath(job_id))
+        finally:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+
+
+def _recover_status_payload(raw_status):
+    decoder = json.JSONDecoder()
+    index = 0
+    payload = None
+    payload_count = 0
+
+    while index < len(raw_status):
+        while index < len(raw_status) and raw_status[index].isspace():
+            index += 1
+        if index >= len(raw_status):
+            break
+        payload, index = decoder.raw_decode(raw_status, index)
+        payload_count += 1
+
+    if payload_count == 0 or not isinstance(payload, dict):
+        return None, 0
+
+    return payload, payload_count
 
 
 def read_job_status(job_id):
     try:
         with open(status_filepath(job_id), encoding="utf-8") as handle:
-            return json.load(handle)
+            raw_status = handle.read()
     except FileNotFoundError:
         return None
+    try:
+        return json.loads(raw_status)
+    except json.JSONDecodeError:
+        payload, payload_count = _recover_status_payload(raw_status)
+        if payload is None:
+            logger.exception("Job %s status file is unreadable JSON", job_id)
+            return None
+
+        logger.warning(
+            "Job %s status file contained %s concatenated JSON payloads; "
+            "recovering the last payload",
+            job_id,
+            payload_count,
+        )
+        try:
+            write_job_status(job_id, payload)
+        except OSError:
+            logger.exception(
+                "Job %s status recovery succeeded in memory but failed to rewrite "
+                "the status file",
+                job_id,
+            )
+        return payload
 
 
 def write_running_job_status(job_id, args, **extra):
