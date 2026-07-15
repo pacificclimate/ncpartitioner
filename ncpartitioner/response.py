@@ -302,32 +302,15 @@ def ncrcat_threads():
 
 
 def chunk_cache_bytes():
-    """HDF5 per-variable chunk cache size (bytes) for generated netCDF4
-    files. NCO's default cache is only a few MB, which is far too small
-    for our chunk sizes and causes cache thrashing on large files.
-    """
-    return int(os.getenv("NCPARTITIONER_CNK_CSH_BYTES", 512 * 1024 * 1024))
+    """HDF5 per-variable chunk cache size for generated netCDF4 files."""
+    return int(os.getenv("NCPARTITIONER_CNK_CSH_BYTES", 64 * 1024 * 1024))
 
 
-def record_dimension_chunk_size():
-    """Time-dimension chunk size for generated netCDF4 files."""
-    return int(os.getenv("NCPARTITIONER_CNK_TIME_SIZE", 1))
-
-
-def generated_file_chunking_flags(args):
-    lat0, lat1 = args["lat"]
-    lon0, lon1 = args["lon"]
+def chunk_cache_flags():
+    """Set NCO's cache without changing the source file's chunk layout."""
     return [
-        "--cnk_plc",
-        "g3d",
         "--cnk_csh",
         str(chunk_cache_bytes()),
-        "--cnk_dmn",
-        f"time,{record_dimension_chunk_size()}",
-        "--cnk_dmn",
-        f"lat,{lat1 - lat0 + 1}",
-        "--cnk_dmn",
-        f"lon,{lon1 - lon0 + 1}",
     ]
 
 
@@ -407,7 +390,7 @@ def slice_command(
         "--no_tmp_fl",
         "-4",
     ]
-    command.extend(generated_file_chunking_flags(args))
+    command.extend(chunk_cache_flags())
     if chunk_level is not None:
         command.extend(["-L", str(chunk_level)])
     if add_record_dimension:
@@ -443,7 +426,7 @@ def make_record_dimension_command(source, destination, args, chunk_level=None):
         "--mk_rec_dmn",
         "time",
     ]
-    command.extend(generated_file_chunking_flags(args))
+    command.extend(chunk_cache_flags())
     if chunk_level is not None:
         command.extend(["-L", str(chunk_level)])
     command.extend([source, destination])
@@ -460,7 +443,7 @@ def concat_command(chunk_paths, destination, args, final_level=None):
     ]
     if final_level is not None:
         command.extend(["-L", str(final_level)])
-    command.extend(generated_file_chunking_flags(args))
+    command.extend(chunk_cache_flags())
 
     threads = ncrcat_threads()
     if threads > 1:

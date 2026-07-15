@@ -86,16 +86,12 @@ def write_running_status(output_dir, job_id):
         )
 
 
-def assert_generated_chunking_flags(command):
+def assert_source_chunking_preserved(command):
     assert "-4" in command
-    assert "--cnk_plc" in command
-    assert command[command.index("--cnk_plc") + 1] == "g3d"
     assert "--cnk_csh" in command
-    assert command[command.index("--cnk_csh") + 1] == str(512 * 1024 * 1024)
-    assert command.count("--cnk_dmn") == 3
-    assert "time,1" in command
-    assert "lat,2" in command
-    assert "lon,2" in command
+    assert command[command.index("--cnk_csh") + 1] == str(64 * 1024 * 1024)
+    assert "--cnk_plc" not in command
+    assert "--cnk_dmn" not in command
 
 
 def test_dds():
@@ -353,16 +349,8 @@ def test_slice_command_applies_chunk_deflate_level():
         "-h",
         "--no_tmp_fl",
         "-4",
-        "--cnk_plc",
-        "g3d",
         "--cnk_csh",
-        str(512 * 1024 * 1024),
-        "--cnk_dmn",
-        "time,1",
-        "--cnk_dmn",
-        "lat,2",
-        "--cnk_dmn",
-        "lon,2",
+        str(64 * 1024 * 1024),
         "-L",
         "2",
         "-v",
@@ -395,16 +383,8 @@ def test_slice_command_can_skip_intermediate_compression():
         "-h",
         "--no_tmp_fl",
         "-4",
-        "--cnk_plc",
-        "g3d",
         "--cnk_csh",
-        str(512 * 1024 * 1024),
-        "--cnk_dmn",
-        "time,1",
-        "--cnk_dmn",
-        "lat,2",
-        "--cnk_dmn",
-        "lon,2",
+        str(64 * 1024 * 1024),
         "-v",
         "tasmax",
         "-d",
@@ -463,7 +443,7 @@ def test_execute_slice_job_defaults_to_uncompressed_intermediate_chunks(
     payload = read_job_status(job_id)
     assert payload["status"] == "complete"
     ncks_command = next(cmd for cmd in commands if cmd[0] == "ncks")
-    assert_generated_chunking_flags(ncks_command)
+    assert_source_chunking_preserved(ncks_command)
     assert "-L" not in ncks_command
     assert not any(cmd[0] == "ncrcat" for cmd in commands)
 
@@ -484,16 +464,8 @@ def test_make_record_dimension_command():
         "-4",
         "--mk_rec_dmn",
         "time",
-        "--cnk_plc",
-        "g3d",
         "--cnk_csh",
-        str(512 * 1024 * 1024),
-        "--cnk_dmn",
-        "time,1",
-        "--cnk_dmn",
-        "lat,2",
-        "--cnk_dmn",
-        "lon,2",
+        str(64 * 1024 * 1024),
         "/chunk.nc",
         "/record_chunk.nc",
     ]
@@ -521,16 +493,8 @@ def test_concat_command_applies_final_deflate_level(monkeypatch):
         "-4",
         "-L",
         "2",
-        "--cnk_plc",
-        "g3d",
         "--cnk_csh",
-        str(512 * 1024 * 1024),
-        "--cnk_dmn",
-        "time,1",
-        "--cnk_dmn",
-        "lat,2",
-        "--cnk_dmn",
-        "lon,2",
+        str(64 * 1024 * 1024),
         "/chunk_0000.nc",
         "/chunk_0001.nc",
         "/final.nc",
@@ -653,7 +617,7 @@ def test_execute_slice_job_can_write_uncompressed_intermediate_chunks(
     payload = read_job_status(job_id)
     assert payload["status"] == "complete"
     ncks_command = next(cmd for cmd in commands if cmd[0] == "ncks")
-    assert_generated_chunking_flags(ncks_command)
+    assert_source_chunking_preserved(ncks_command)
     assert "-L" not in ncks_command
     assert not any(cmd[0] == "ncrcat" for cmd in commands)
 
@@ -702,8 +666,8 @@ def test_execute_slice_job_can_write_compressed_final_output(tmp_path, monkeypat
     assert payload["status"] == "complete"
     ncks_command = next(cmd for cmd in commands if cmd[0] == "ncks")
     ncrcat_command = next(cmd for cmd in commands if cmd[0] == "ncrcat")
-    assert_generated_chunking_flags(ncks_command)
-    assert_generated_chunking_flags(ncrcat_command)
+    assert_source_chunking_preserved(ncks_command)
+    assert_source_chunking_preserved(ncrcat_command)
     assert "-L" not in ncks_command
     assert "-L" in ncrcat_command
 
@@ -752,7 +716,7 @@ def test_execute_slice_job_treats_non_true_intermediate_compression_env_as_false
     payload = read_job_status(job_id)
     assert payload["status"] == "complete"
     ncks_command = next(cmd for cmd in commands if cmd[0] == "ncks")
-    assert_generated_chunking_flags(ncks_command)
+    assert_source_chunking_preserved(ncks_command)
     assert "-L" not in ncks_command
     assert not any(cmd[0] == "ncrcat" for cmd in commands)
 
