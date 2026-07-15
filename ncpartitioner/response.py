@@ -3,10 +3,11 @@
 DDS/DAS/ASCII requests redirect immediately to THREDDS. NetCDF slice requests
 are enqueued onto a Dragonfly-backed queue and processed by a separate
 worker process (see worker.py). Job status is published through local
-metadata stored under OUTPUT_DIR/.jobs, same as before -- only how a job
-gets *started* has changed; execute_slice_job itself is unmodified.
+metadata stored under OUTPUT_DIR/.jobs. Jobs can use the default NCO pipeline
+or the opt-in direct NetCDF4 writer while keeping the same HTTP contract.
 """
 
+import builtins
 import concurrent.futures
 import json
 import logging
@@ -19,6 +20,7 @@ import uuid
 from datetime import datetime, timezone
 from time import monotonic
 
+import netCDF4
 from flask import Response, redirect
 
 from . import queue_client
@@ -107,6 +109,7 @@ def build_job_status(job_id, args, status, **extra):
         "status_url": status_url(job_id),
         "download_url": output_url(args),
         "output_filename": output_filename(args),
+        "backend": args.get("backend", "nco"),
         "updated_at": utcnow_iso(),
     }
     payload.update(extra)
@@ -267,13 +270,14 @@ def bytes_per_element(source_bytes=None):
     return DEFAULT_BYTES_PER_ELEMENT
 
 
-def time_windows(args, source_bytes=None):
+def time_windows(args, source_bytes=None, byte_budget=None):
     start, end = args["time"]
     lat0, lat1 = args["lat"]
     lon0, lon1 = args["lon"]
     n_lat, n_lon = lat1 - lat0 + 1, lon1 - lon0 + 1
     bytes_per_step = max(n_lat * n_lon * bytes_per_element(source_bytes), 1)
-    window = max(1, chunk_byte_budget() // bytes_per_step)
+    budget = chunk_byte_budget() if byte_budget is None else byte_budget
+    window = max(1, budget // bytes_per_step)
     return [(s, min(s + window - 1, end)) for s in range(start, end + 1, window)]
 
 
@@ -304,6 +308,11 @@ def ncrcat_threads():
 def chunk_cache_bytes():
     """HDF5 per-variable chunk cache size for generated netCDF4 files."""
     return int(os.getenv("NCPARTITIONER_CNK_CSH_BYTES", 64 * 1024 * 1024))
+
+
+def netcdf4_slab_byte_budget():
+    """Maximum in-memory data slab used by the direct NetCDF4 writer."""
+    return int(os.getenv("NCPARTITIONER_NETCDF4_SLAB_BYTES", 64 * 1024 * 1024))
 
 
 def chunk_cache_flags():
@@ -641,8 +650,8 @@ def concat_chunks_with_fallback(
     return messages
 
 
-def execute_slice_job(job_id, args):
-    """Run one slice job, invoked by the worker process."""
+def execute_nco_slice_job(job_id, args):
+    """Run one slice job with the existing ncks/ncrcat pipeline."""
     source_filepath = input_filepath(args)
     final_path = output_filepath(args)
     source_is_unlimited, source_level, source_bytes = inspect_source(
@@ -799,6 +808,180 @@ def execute_slice_job(job_id, args):
     fail_job(job_id, args, "Slice job did not create an output file")
 
 
+def _copy_netcdf_attributes(source, destination, *, exclude=()):
+    attributes = {
+        name: source.getncattr(name) for name in source.ncattrs() if name not in exclude
+    }
+    if attributes:
+        destination.setncatts(attributes)
+
+
+def _output_chunksizes(source_variable, output_dimension_sizes):
+    """Preserve source chunks, clamped to the smaller subset dimensions."""
+    chunks = source_variable.chunking()
+    if chunks == "contiguous":
+        return None
+    return tuple(
+        max(1, min(int(chunk), output_dimension_sizes[dimension]))
+        for dimension, chunk in zip(source_variable.dimensions, chunks)
+    )
+
+
+def _create_netcdf_variable(output, source_variable, output_dimension_sizes):
+    fill_value = (
+        source_variable.getncattr("_FillValue")
+        if "_FillValue" in source_variable.ncattrs()
+        else None
+    )
+    options = {}
+    chunksizes = _output_chunksizes(source_variable, output_dimension_sizes)
+    if chunksizes is not None:
+        options["chunksizes"] = chunksizes
+    if compress_final_output():
+        options.update(zlib=True, complevel=deflate_level(), shuffle=True)
+
+    destination = output.createVariable(
+        source_variable.name,
+        source_variable.datatype,
+        source_variable.dimensions,
+        fill_value=fill_value,
+        **options,
+    )
+    _copy_netcdf_attributes(source_variable, destination, exclude={"_FillValue"})
+    source_variable.set_auto_maskandscale(False)
+    destination.set_auto_maskandscale(False)
+    return destination
+
+
+def execute_netcdf4_slice_job(job_id, args):
+    """Write a bounded-memory NetCDF4 subset directly, without temp chunks."""
+    source_path = input_filepath(args)
+    temp_path = final_temp_filepath(job_id, args)
+    final_path = output_filepath(args)
+    time_start, time_end = args["time"]
+    selected_sizes = {
+        "time": time_end - time_start + 1,
+        "lat": args["lat"][1] - args["lat"][0] + 1,
+        "lon": args["lon"][1] - args["lon"][0] + 1,
+    }
+    started = monotonic()
+
+    try:
+        with netCDF4.Dataset(source_path) as source:
+            source_variable = source.variables[args["variable"]]
+            source_variable.set_auto_maskandscale(False)
+            windows = time_windows(
+                args,
+                source_variable.dtype.itemsize,
+                byte_budget=netcdf4_slab_byte_budget(),
+            )
+            write_running_job_status(
+                job_id,
+                args,
+                phase="extracting",
+                chunks_complete=0,
+                chunks_total=len(windows),
+            )
+
+            with netCDF4.Dataset(temp_path, "w", format="NETCDF4") as output:
+                _copy_netcdf_attributes(source, output, exclude={"_NCProperties"})
+                for dimension in ("time", "lat", "lon"):
+                    output.createDimension(
+                        dimension,
+                        None if dimension == "time" else selected_sizes[dimension],
+                    )
+
+                output_sizes = dict(selected_sizes)
+                destination_variables = {}
+                for name in ("time", "lat", "lon", args["variable"]):
+                    if name not in source.variables or name in destination_variables:
+                        continue
+                    destination_variables[name] = _create_netcdf_variable(
+                        output, source.variables[name], output_sizes
+                    )
+
+                for dimension in ("time", "lat", "lon"):
+                    if dimension not in destination_variables:
+                        continue
+                    start, end = args[dimension]
+                    destination_variables[dimension][:] = source.variables[dimension][
+                        start : end + 1
+                    ]
+
+                destination_variable = destination_variables[args["variable"]]
+                for completed, (slab_start, slab_end) in enumerate(windows, start=1):
+                    source_slice = []
+                    destination_slice = []
+                    for dimension in source_variable.dimensions:
+                        start, end = args[dimension]
+                        if dimension == "time":
+                            source_slice.append(
+                                builtins.slice(slab_start, slab_end + 1)
+                            )
+                            output_start = slab_start - time_start
+                            destination_slice.append(
+                                builtins.slice(
+                                    output_start,
+                                    output_start + slab_end - slab_start + 1,
+                                )
+                            )
+                        else:
+                            source_slice.append(builtins.slice(start, end + 1))
+                            destination_slice.append(builtins.slice(None))
+
+                    data = source_variable[tuple(source_slice)]
+                    destination_variable[tuple(destination_slice)] = data
+                    del data
+                    write_running_job_status(
+                        job_id,
+                        args,
+                        phase="extracting",
+                        chunks_complete=completed,
+                        chunks_total=len(windows),
+                    )
+
+        os.replace(temp_path, final_path)
+    except Exception:  # netCDF-C errors surface as several Python types
+        logger.exception("NetCDF4 slice job %s failed", job_id)
+        fail_job(
+            job_id,
+            args,
+            "Direct NetCDF4 subset failed. Try a smaller time or spatial range.",
+        )
+        return
+
+    logger.info(
+        "NetCDF4 slice job %s wrote %s bytes in %.2fs using %s slabs",
+        job_id,
+        os.path.getsize(final_path),
+        monotonic() - started,
+        len(windows),
+    )
+    cleanup_job_temp_dir(job_id)
+    payload = read_job_status(job_id)
+    if payload is None:
+        logger.warning("Slice job %s lost its status record", job_id)
+        return
+    write_job_status(
+        job_id,
+        build_job_status(
+            job_id,
+            args,
+            "complete",
+            started_at=payload.get("started_at"),
+            completed_at=utcnow_iso(),
+            operator_warnings=[],
+        ),
+    )
+
+
+def execute_slice_job(job_id, args):
+    """Run one queued slice job using its selected backend."""
+    if args.get("backend", "nco") == "netcdf4":
+        return execute_netcdf4_slice_job(job_id, args)
+    return execute_nco_slice_job(job_id, args)
+
+
 def slice(args):
     """Enqueue a slice job onto the Dragonfly-backed queue and return 202
     immediately with the job's queue position. A separate worker process
@@ -834,6 +1017,7 @@ def slice(args):
             "status_url": status_url(job_id),
             "download_url": output_url(args),
             "output_filename": output_filename(args),
+            "backend": args.get("backend", "nco"),
         },
         status=202,
     )

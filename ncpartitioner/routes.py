@@ -1,3 +1,5 @@
+import os
+
 from flask import Blueprint, request
 from ncpartitioner.sanitize import (
     check_filepath,
@@ -42,6 +44,12 @@ def ncpartitioner():
         try:
             args.update(check_targets_slice(targets))
             check_ranges(args)
+            backend = request.args.get(
+                "backend", os.getenv("NCPARTITIONER_BACKEND", "nco")
+            ).lower()
+            if backend not in {"nco", "netcdf4"}:
+                raise ValueError("Invalid backend: must be nco or netcdf4")
+            args["backend"] = backend
         except ValueError as ve:
             logger.error(f"Input error: {ve}")
             return f"Input error: {ve}", 400

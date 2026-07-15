@@ -5,6 +5,105 @@ from ncpartitioner import create_app
 from ncpartitioner.response import build_job_status, read_job_status, write_job_status
 
 
+def test_partition_passes_netcdf4_backend_to_slice():
+    app = create_app()
+    client = app.test_client()
+    checked = {
+        "request_format": "nc",
+        "basename": "tasmax",
+        "dirname": "tests/data",
+        "extension": "nc",
+        "timestamp": 1,
+    }
+
+    with (
+        patch("ncpartitioner.routes.check_filepath", return_value=checked),
+        patch(
+            "ncpartitioner.routes.check_targets_slice",
+            return_value={
+                "variable": "tasmax",
+                "time": (0, 1),
+                "lat": (0, 1),
+                "lon": (0, 1),
+            },
+        ),
+        patch("ncpartitioner.routes.check_ranges"),
+        patch("ncpartitioner.routes.slice", return_value=("queued", 202)) as enqueue,
+    ):
+        response = client.get(
+            "/partition/?filepath=data/tasmax.nc&targets=x&backend=netcdf4"
+        )
+
+    assert response.status_code == 202
+    assert enqueue.call_args.args[0]["backend"] == "netcdf4"
+
+
+def test_partition_rejects_unknown_backend():
+    app = create_app()
+    client = app.test_client()
+    checked = {
+        "request_format": "nc",
+        "basename": "tasmax",
+        "dirname": "tests/data",
+        "extension": "nc",
+        "timestamp": 1,
+    }
+
+    with (
+        patch("ncpartitioner.routes.check_filepath", return_value=checked),
+        patch(
+            "ncpartitioner.routes.check_targets_slice",
+            return_value={
+                "variable": "tasmax",
+                "time": (0, 1),
+                "lat": (0, 1),
+                "lon": (0, 1),
+            },
+        ),
+        patch("ncpartitioner.routes.check_ranges"),
+    ):
+        response = client.get(
+            "/partition/?filepath=data/tasmax.nc&targets=x&backend=dask"
+        )
+
+    assert response.status_code == 400
+    assert response.get_data(as_text=True) == (
+        "Input error: Invalid backend: must be nco or netcdf4"
+    )
+
+
+def test_partition_uses_backend_from_environment(monkeypatch):
+    monkeypatch.setenv("NCPARTITIONER_BACKEND", "netcdf4")
+    app = create_app()
+    client = app.test_client()
+    checked = {
+        "request_format": "nc",
+        "basename": "tasmax",
+        "dirname": "tests/data",
+        "extension": "nc",
+        "timestamp": 1,
+    }
+
+    with (
+        patch("ncpartitioner.routes.check_filepath", return_value=checked),
+        patch(
+            "ncpartitioner.routes.check_targets_slice",
+            return_value={
+                "variable": "tasmax",
+                "time": (0, 1),
+                "lat": (0, 1),
+                "lon": (0, 1),
+            },
+        ),
+        patch("ncpartitioner.routes.check_ranges"),
+        patch("ncpartitioner.routes.slice", return_value=("queued", 202)) as enqueue,
+    ):
+        response = client.get("/partition/?filepath=data/tasmax.nc&targets=x")
+
+    assert response.status_code == 202
+    assert enqueue.call_args.args[0]["backend"] == "netcdf4"
+
+
 def test_partition_status_not_found():
     app = create_app()
     client = app.test_client()

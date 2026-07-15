@@ -174,6 +174,48 @@ def test_execute_slice_job_marks_failure(tmp_path, monkeypatch):
     )
 
 
+def test_execute_slice_job_can_write_direct_netcdf4_subset(tmp_path, monkeypatch):
+    monkeypatch.setenv("OUTPUT_DIR", str(tmp_path))
+    monkeypatch.setenv("NCPARTITIONER_NETCDF4_SLAB_BYTES", "16")
+    source_path = tmp_path / "source.nc"
+    make_source_netcdf(source_path, unlimited_time=False)
+    request_args = {
+        "basename": "source",
+        "dirname": str(tmp_path),
+        "extension": "nc",
+        "timestamp": 101,
+        "variable": "tasmax",
+        "time": (1, 2),
+        "lat": (0, 1),
+        "lon": (1, 1),
+        "backend": "netcdf4",
+    }
+    job_id = "direct-netcdf4-job"
+    os.makedirs(os.path.join(str(tmp_path), ".jobs", job_id), exist_ok=True)
+    write_running_status(tmp_path, job_id)
+
+    with patch("ncpartitioner.response.subprocess.run") as run:
+        execute_slice_job(job_id, request_args)
+
+    run.assert_not_called()
+    payload = read_job_status(job_id)
+    assert payload["status"] == "complete"
+    assert payload["backend"] == "netcdf4"
+    assert payload["operator_warnings"] == []
+
+    output_path = tmp_path / "source_101.nc"
+    with netCDF4.Dataset(output_path) as output:
+        assert output.data_model == "NETCDF4"
+        assert output.dimensions["time"].isunlimited()
+        assert output.variables["time"][:].tolist() == [1, 2]
+        assert output.variables["lat"][:].tolist() == [0, 1]
+        assert output.variables["lon"][:].tolist() == [1]
+        assert output.variables["tasmax"][:].tolist() == [
+            [[5.0], [7.0]],
+            [[9.0], [11.0]],
+        ]
+
+
 def test_execute_slice_job_sanitizes_merge_failure(tmp_path, monkeypatch):
     monkeypatch.setenv("OUTPUT_DIR", str(tmp_path))
     monkeypatch.setenv("NCPARTITIONER_CHUNK_BYTES", "64")
