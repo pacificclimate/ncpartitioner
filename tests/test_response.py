@@ -463,11 +463,9 @@ def test_execute_slice_job_defaults_to_uncompressed_intermediate_chunks(
     payload = read_job_status(job_id)
     assert payload["status"] == "complete"
     ncks_command = next(cmd for cmd in commands if cmd[0] == "ncks")
-    ncrcat_command = next(cmd for cmd in commands if cmd[0] == "ncrcat")
     assert_generated_chunking_flags(ncks_command)
-    assert_generated_chunking_flags(ncrcat_command)
     assert "-L" not in ncks_command
-    assert "-L" not in ncrcat_command
+    assert not any(cmd[0] == "ncrcat" for cmd in commands)
 
 
 def test_make_record_dimension_command():
@@ -655,11 +653,9 @@ def test_execute_slice_job_can_write_uncompressed_intermediate_chunks(
     payload = read_job_status(job_id)
     assert payload["status"] == "complete"
     ncks_command = next(cmd for cmd in commands if cmd[0] == "ncks")
-    ncrcat_command = next(cmd for cmd in commands if cmd[0] == "ncrcat")
     assert_generated_chunking_flags(ncks_command)
-    assert_generated_chunking_flags(ncrcat_command)
     assert "-L" not in ncks_command
-    assert "-L" not in ncrcat_command
+    assert not any(cmd[0] == "ncrcat" for cmd in commands)
 
 
 def test_execute_slice_job_can_write_compressed_final_output(tmp_path, monkeypatch):
@@ -756,11 +752,9 @@ def test_execute_slice_job_treats_non_true_intermediate_compression_env_as_false
     payload = read_job_status(job_id)
     assert payload["status"] == "complete"
     ncks_command = next(cmd for cmd in commands if cmd[0] == "ncks")
-    ncrcat_command = next(cmd for cmd in commands if cmd[0] == "ncrcat")
     assert_generated_chunking_flags(ncks_command)
-    assert_generated_chunking_flags(ncrcat_command)
     assert "-L" not in ncks_command
-    assert "-L" not in ncrcat_command
+    assert not any(cmd[0] == "ncrcat" for cmd in commands)
 
 
 @pytest.mark.parametrize(

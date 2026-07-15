@@ -770,17 +770,20 @@ def execute_slice_job(job_id, args):
         chunks_total=len(windows),
         chunk_bytes=chunk_bytes,
     )
-    merge_messages = concat_chunks_with_fallback(
-        job_id,
-        args,
-        ordered_chunk_paths,
-        temp_final_path,
-        chunk_level=chunk_level,
-        final_level=final_level,
-    )
-    if merge_messages is _STEP_FAILED:
-        return
-    stderr_messages.extend(msg for msg in merge_messages if msg)
+    if len(ordered_chunk_paths) == 1 and final_level is None:
+        os.replace(ordered_chunk_paths[0], temp_final_path)
+    else:
+        merge_messages = concat_chunks_with_fallback(
+            job_id,
+            args,
+            ordered_chunk_paths,
+            temp_final_path,
+            chunk_level=chunk_level,
+            final_level=final_level,
+        )
+        if merge_messages is _STEP_FAILED:
+            return
+        stderr_messages.extend(msg for msg in merge_messages if msg)
     os.replace(temp_final_path, final_path)
     merge_finished = monotonic()
     logger.info(
