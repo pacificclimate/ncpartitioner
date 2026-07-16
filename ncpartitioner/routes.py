@@ -47,8 +47,8 @@ def ncpartitioner():
             backend = request.args.get(
                 "backend", os.getenv("NCPARTITIONER_BACKEND", "nco")
             ).lower()
-            if backend not in {"nco", "netcdf4"}:
-                raise ValueError("Invalid backend: must be nco or netcdf4")
+            if backend not in {"nco", "ncks", "netcdf4"}:
+                raise ValueError("Invalid backend: must be nco, ncks, or netcdf4")
             args["backend"] = backend
         except ValueError as ve:
             logger.error(f"Input error: {ve}")

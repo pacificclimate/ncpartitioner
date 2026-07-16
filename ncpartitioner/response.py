@@ -323,6 +323,19 @@ def chunk_cache_flags():
     ]
 
 
+def ncks_time_chunk_size(args, source_bytes):
+    """Derive an output time chunk that fits the direct ncks byte budget."""
+    lat0, lat1 = args["lat"]
+    lon0, lon1 = args["lon"]
+    bytes_per_timestep = max((lat1 - lat0 + 1) * (lon1 - lon0 + 1) * source_bytes, 1)
+    requested_budget = int(
+        os.getenv("NCPARTITIONER_NCKS_CHUNK_BYTES", chunk_cache_bytes())
+    )
+    # NetCDF4 cannot create chunks of 4 GiB or larger.
+    safe_budget = min(max(1, requested_budget), 4 * 1024**3 - 1)
+    return max(1, safe_budget // bytes_per_timestep)
+
+
 def source_variable_bytes_from_header(header, variable):
     declaration_prefix = f"{variable}("
     for line in header.splitlines():
@@ -391,6 +404,7 @@ def slice_command(
     time_end,
     chunk_level,
     add_record_dimension=False,
+    time_chunk_size=None,
 ):
     command = [
         "ncks",
@@ -404,6 +418,8 @@ def slice_command(
         command.extend(["-L", str(chunk_level)])
     if add_record_dimension:
         command.extend(["--mk_rec_dmn", "time"])
+    if time_chunk_size is not None:
+        command.extend(["--cnk_dmn", f"time,{time_chunk_size}"])
     command.extend(
         [
             "-v",
@@ -808,6 +824,77 @@ def execute_nco_slice_job(job_id, args):
     fail_job(job_id, args, "Slice job did not create an output file")
 
 
+def execute_ncks_slice_job(job_id, args):
+    """Run one ncks process over the complete requested hyperslab."""
+    source_filepath = input_filepath(args)
+    temporary_output = final_temp_filepath(job_id, args)
+    final_path = output_filepath(args)
+    source_is_unlimited, source_level, source_bytes = inspect_source(
+        source_filepath, args["variable"]
+    )
+    final_level = (
+        chunk_deflate_level(source_level, deflate_level())
+        if compress_final_output()
+        else 0
+    )
+    output_time_chunk_size = ncks_time_chunk_size(args, source_bytes)
+
+    logger.info(
+        "Slice job %s extracting one complete hyperslab with ncks; "
+        "final_deflate_level=%s output_time_chunk_size=%s "
+        "needs_record_dimension=%s",
+        job_id,
+        final_level,
+        output_time_chunk_size,
+        not source_is_unlimited,
+    )
+    write_running_job_status(
+        job_id,
+        args,
+        phase="extracting",
+        chunks_complete=0,
+        chunks_total=1,
+    )
+    stderr = run_subprocess_step(
+        job_id,
+        args,
+        slice_command(
+            args,
+            source_filepath,
+            temporary_output,
+            args["time"][0],
+            args["time"][1],
+            final_level,
+            add_record_dimension=not source_is_unlimited,
+            time_chunk_size=output_time_chunk_size,
+        ),
+    )
+    if stderr is _STEP_FAILED:
+        return
+
+    if not os.path.isfile(temporary_output):
+        fail_job(job_id, args, "Slice job did not create an output file")
+        return
+
+    os.replace(temporary_output, final_path)
+    cleanup_job_temp_dir(job_id)
+    payload = read_job_status(job_id)
+    if payload is None:
+        logger.warning("Slice job %s lost its status record", job_id)
+        return
+    write_job_status(
+        job_id,
+        build_job_status(
+            job_id,
+            args,
+            "complete",
+            started_at=payload.get("started_at"),
+            completed_at=utcnow_iso(),
+            operator_warnings=[stderr] if stderr else [],
+        ),
+    )
+
+
 def _copy_netcdf_attributes(source, destination, *, exclude=()):
     attributes = {
         name: source.getncattr(name) for name in source.ncattrs() if name not in exclude
@@ -979,6 +1066,8 @@ def execute_slice_job(job_id, args):
     """Run one queued slice job using its selected backend."""
     if args.get("backend", "nco") == "netcdf4":
         return execute_netcdf4_slice_job(job_id, args)
+    if args.get("backend", "nco") == "ncks":
+        return execute_ncks_slice_job(job_id, args)
     return execute_nco_slice_job(job_id, args)
 
 

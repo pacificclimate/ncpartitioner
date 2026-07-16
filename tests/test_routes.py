@@ -68,7 +68,7 @@ def test_partition_rejects_unknown_backend():
 
     assert response.status_code == 400
     assert response.get_data(as_text=True) == (
-        "Input error: Invalid backend: must be nco or netcdf4"
+        "Input error: Invalid backend: must be nco, ncks, or netcdf4"
     )
 
 

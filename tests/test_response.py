@@ -18,6 +18,7 @@ from ncpartitioner.response import (
     execute_slice_job,
     looks_like_missing_record_dimension,
     make_record_dimension_command,
+    ncks_time_chunk_size,
     read_job_status,
     slice,
     slice_command,
@@ -216,6 +217,42 @@ def test_execute_slice_job_can_write_direct_netcdf4_subset(tmp_path, monkeypatch
         ]
 
 
+def test_execute_slice_job_can_run_single_ncks(tmp_path, monkeypatch):
+    monkeypatch.setenv("OUTPUT_DIR", str(tmp_path))
+    monkeypatch.setenv("NCPARTITIONER_NCKS_CHUNK_BYTES", "8")
+    source_path = tmp_path / "source.nc"
+    make_source_netcdf(source_path, unlimited_time=False)
+    request_args = {
+        "basename": "source",
+        "dirname": str(tmp_path),
+        "extension": "nc",
+        "timestamp": 103,
+        "variable": "tasmax",
+        "time": (1, 2),
+        "lat": (0, 1),
+        "lon": (1, 1),
+        "backend": "ncks",
+    }
+    job_id = "single-ncks-job"
+    os.makedirs(os.path.join(str(tmp_path), ".jobs", job_id), exist_ok=True)
+    write_running_status(tmp_path, job_id)
+
+    execute_slice_job(job_id, request_args)
+
+    payload = read_job_status(job_id)
+    assert payload["status"] == "complete"
+    assert payload["backend"] == "ncks"
+    output_path = tmp_path / "source_103.nc"
+    with netCDF4.Dataset(output_path) as output:
+        assert output.dimensions["time"].isunlimited()
+        assert output.variables["tasmax"].chunking()[0] == 1
+        assert output.variables["time"][:].tolist() == [1, 2]
+        assert output.variables["tasmax"][:].tolist() == [
+            [[5.0], [7.0]],
+            [[9.0], [11.0]],
+        ]
+
+
 def test_execute_slice_job_sanitizes_merge_failure(tmp_path, monkeypatch):
     monkeypatch.setenv("OUTPUT_DIR", str(tmp_path))
     monkeypatch.setenv("NCPARTITIONER_CHUNK_BYTES", "64")
@@ -352,6 +389,16 @@ def test_chunk_byte_budget_defaults_to_one_gib(monkeypatch):
     monkeypatch.delenv("NCPARTITIONER_CHUNK_BYTES", raising=False)
 
     assert chunk_byte_budget() == 1024 * 1024 * 1024
+
+
+def test_ncks_time_chunk_size_uses_selected_grid_and_byte_budget(monkeypatch):
+    monkeypatch.setenv("NCPARTITIONER_NCKS_CHUNK_BYTES", str(64 * 1024 * 1024))
+    request_args = {
+        "lat": (0, 508),
+        "lon": (0, 1066),
+    }
+
+    assert ncks_time_chunk_size(request_args, source_bytes=8) == 15
 
 
 def test_source_variable_bytes_from_header_parses_short_variable():
