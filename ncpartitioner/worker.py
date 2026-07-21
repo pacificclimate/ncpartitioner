@@ -6,13 +6,10 @@ and runs them to completion via execute_slice_job (unchanged from the
 request-handling module).
 
 Concurrency model:
-  - Each worker process runs jobs ONE AT A TIME from the queue, but within
-    a job still uses the existing ThreadPoolExecutor (max_workers, default
-    3) for parallel ncks calls.
-  - Total system-wide ncks concurrency = (number of worker processes) x
-    NCPARTITIONER_MAX_WORKERS. Run N copies of this worker (e.g. via
-    `deploy: replicas: N` in compose) to size that independently of
-    gunicorn's --workers, which now only governs HTTP-handling capacity.
+  - Each worker process runs one bounded-memory direct NetCDF4 job at a time.
+  - Run N worker replicas (e.g. via `deploy: replicas: N` in compose) to
+    control system-wide subset concurrency independently of gunicorn's
+    HTTP-handling capacity.
 
 Run with: python worker.py
 """

@@ -1,13 +1,12 @@
 # NCPartitioner
 
-This container generates user-requested netCDF files using `ncks` and makes them available for download via THREDDS.
+This container writes bounded-memory NetCDF4 subsets and makes them available for download via THREDDS.
 
 ## Run for Development
 
-The Unidata netCDF tools must be installed. This package can be installed with poetry:
+This package can be installed with poetry:
 
 ```
-apt get install nco
 github clone http://github.com/pacificclimate/ncpartitioner
 poetry install
 ```
@@ -18,13 +17,9 @@ To do end-to-end testing, you will also need a THREDDS instance running on your 
 * `THREDDS_HTTP_BASE` - the base URL for the THREDDS http server (probably ends /fileserver); a user will be redirected to download the completed file
 * `THREDDS_DAP_BASE` - the base URL for the THREDDS openDAP server (probably ends /dodsC): used to fulfill metadata requests
 * `DATA_ROOT` - directory under which all data is found; prevents files outside the directory from being served
-* `NCPARTITIONER_CHUNK_BYTES` - optional target size, in bytes, for each time-window slice job; defaults to `1073741824` (1 GiB). Smaller values reduce per-`ncks` memory pressure but create more chunks.
-* `NCPARTITIONER_BYTES_PER_ELEMENT` - optional byte estimate used by the chunk planner. When unset, the planner inspects the source variable type from `ncdump -hs` and falls back to `4` only when that inspection fails.
-* `NCPARTITIONER_MAX_WORKERS` - optional maximum number of chunk extraction workers; defaults to `1`. Increase cautiously because each worker runs its own `ncks` process.
-* `NCPARTITIONER_DEFLATE_LEVEL` - optional netCDF4 compression level passed to the final `ncrcat -L`; defaults to `1`.
-* `NCPARTITIONER_COMPRESS_INTERMEDIATE_CHUNKS` - optional toggle for intermediate chunk compression. Defaults to `false`. Only the literal value `true` enables intermediate compression.
-* `NCPARTITIONER_COMPRESS_FINAL_OUTPUT` - optional toggle for final output compression. Defaults to `false`. Only the literal value `true` enables `ncrcat -L`.
-* `NCPARTITIONER_NCRCAT_THREADS` - optional thread count passed to final `ncrcat -t`; defaults to `1`. Increase only after measuring because higher values can increase CPU and IO contention.
+* `NCPARTITIONER_NETCDF4_SLAB_BYTES` - optional maximum primary data slab size for the direct writer; defaults to `67108864` (64 MiB). Larger values reduce slab-loop overhead but increase peak memory use.
+* `NCPARTITIONER_DEFLATE_LEVEL` - optional NetCDF4 compression level when final compression is enabled; defaults to `1`.
+* `NCPARTITIONER_COMPRESS_FINAL_OUTPUT` - optional toggle for final output compression. Defaults to `false`. Only the literal value `true` enables compression.
 * `NCPARTITIONER_QUEUE_IDLE_TTL_SECONDS` - optional queued-job heartbeat timeout. A queued job that is not polled via `status_url` within this many seconds is failed and discarded; defaults to `300`.
 
 Run with flask:
@@ -43,7 +38,7 @@ This server assumes all files to be downloaded are netCDF4 files with dimensions
 
 ## Request format
 
-Request format is indicated by concatenating an extension onto the `filepath` parameter. Some request formats require an additional `targets` parameter. Request attributes other than `targets` and `filepath` are ignored.
+Request format is indicated by concatenating an extension onto the `filepath` parameter. Some request formats require an additional `targets` parameter.
 
 This server supports four request formats. Three of them are simply redirected to the THREDDS server:
 
@@ -68,7 +63,7 @@ Redirects to a THREDDS page displaying values for the requested dimension variab
 Starts an asynchronous slice job. The initial response is `202 Accepted` with a JSON body containing:
 
 * `status` - always `queued` for the initial response
-* `job_id` - backend-generated identifier for the slice job
+* `job_id` - server-generated identifier for the slice job
 * `queue_position` - current queue position when available
 * `status_url` - relative polling path in the form `partition/status/<job_id>`; intentionally no leading slash
 * `download_url` - final THREDDS download URL for the output file
@@ -87,28 +82,18 @@ Queued jobs now carry two timestamps:
 
 If a queued job is not polled within `NCPARTITIONER_QUEUE_IDLE_TTL_SECONDS`, it is treated as abandoned, failed, and removed from Dragonfly instead of lingering indefinitely.
 
-Running jobs may include progress fields:
+Running jobs include progress fields:
 
-* `phase` - current processing phase, currently `extracting` or `merging`
-* `chunks_complete` - number of chunk extraction tasks completed
-* `chunks_total` - total chunk extraction tasks for the request
-* `chunk_bytes` - total bytes of extracted chunks, included during `merging`
+* `phase` - currently `extracting`
+* `chunks_complete` - number of direct-write slabs completed
+* `chunks_total` - total direct-write slabs
 
 Completed jobs keep the same `download_url` and `output_filename` values, so the frontend can start the download when status becomes `complete`.
 
-Chunking notes:
+Direct-write notes:
 
-* Large requests are split into multiple time windows based on `NCPARTITIONER_CHUNK_BYTES`
-* Chunk extraction runs in parallel up to `NCPARTITIONER_MAX_WORKERS`
-* By default, both intermediate chunks and final output are written without explicit deflate compression
-* If `NCPARTITIONER_COMPRESS_INTERMEDIATE_CHUNKS=true`, intermediate chunks are written with `ncks` subsetting and chunk compression (`-4 -L <level>`), where the level preserves the source deflate level when present and otherwise uses `NCPARTITIONER_DEFLATE_LEVEL`
-* If `NCPARTITIONER_COMPRESS_FINAL_OUTPUT=true`, the final `ncrcat` applies `NCPARTITIONER_DEFLATE_LEVEL` once when creating the output file
-* If the source file does not already use an unlimited `time` dimension, the chunk step adds `--mk_rec_dmn time`
-* Completed chunks are concatenated in time order with a single final `ncrcat`
-* If the first `ncrcat` still fails because chunks are not record-dimension files, the job converts chunk copies with `ncks --mk_rec_dmn time` and retries `ncrcat`
-* NCO internal temp files are disabled with `--no_tmp_fl` because all chunk and final-merge output is already written under job-scoped `.jobs/<job_id>` paths before publication
-* `NCPARTITIONER_CHUNK_BYTES` is a per-chunk target, not a per-time-index target
-* Approximate in-flight slice memory is `NCPARTITIONER_CHUNK_BYTES * NCPARTITIONER_MAX_WORKERS`, plus process and netCDF/NCO overhead
-* The chunk planner estimates bytes from `lat * lon * bytes_per_element`, where `bytes_per_element` comes from the inspected source variable type unless overridden by `NCPARTITIONER_BYTES_PER_ELEMENT`
+* The source variable is read and written in continuous time slabs bounded by `NCPARTITIONER_NETCDF4_SLAB_BYTES`.
+* The output is written under job-scoped `.jobs/<job_id>` storage and atomically renamed into the THREDDS-visible directory only after it has closed successfully.
+* Disabling final compression provides the highest write throughput.
 
 Note that the variable is always trimmed to the hyperslab specified in the dimensions portion of the `targets` attribute; if the variable portion of the `targets` attribute is different, it will be overruled.

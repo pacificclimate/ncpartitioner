@@ -1,5 +1,3 @@
-import os
-
 from flask import Blueprint, request
 from ncpartitioner.sanitize import (
     check_filepath,
@@ -24,7 +22,7 @@ def partition_status(job_id):
 
 @partition.route("/", methods=["GET"])
 def ncpartitioner():
-    """creates the requested netCDF with NCO, moves it to where THREDDS can serve it, and returns a link to the user"""
+    """Queue a direct NetCDF4 subset for publication through THREDDS."""
     logger.info(f"received request {request.url}")
     filepath = request.args.get("filepath")
     targets = request.args.get("targets", None)
@@ -44,12 +42,6 @@ def ncpartitioner():
         try:
             args.update(check_targets_slice(targets))
             check_ranges(args)
-            backend = request.args.get(
-                "backend", os.getenv("NCPARTITIONER_BACKEND", "nco")
-            ).lower()
-            if backend not in {"nco", "ncks", "netcdf4"}:
-                raise ValueError("Invalid backend: must be nco, ncks, or netcdf4")
-            args["backend"] = backend
         except ValueError as ve:
             logger.error(f"Input error: {ve}")
             return f"Input error: {ve}", 400

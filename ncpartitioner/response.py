@@ -1,19 +1,16 @@
 """Send responses to user requests.
 
 DDS/DAS/ASCII requests redirect immediately to THREDDS. NetCDF slice requests
-are enqueued onto a Dragonfly-backed queue and processed by a separate
-worker process (see worker.py). Job status is published through local
-metadata stored under OUTPUT_DIR/.jobs. Jobs can use the default NCO pipeline
-or the opt-in direct NetCDF4 writer while keeping the same HTTP contract.
+are enqueued onto a Dragonfly-backed queue and processed by a separate worker
+process (see worker.py). The worker writes bounded-memory NetCDF4 subsets
+directly into the THREDDS-visible output directory.
 """
 
 import builtins
-import concurrent.futures
 import json
 import logging
 import os
 import shutil
-import subprocess
 import tempfile
 import threading
 import uuid
@@ -28,20 +25,6 @@ from . import queue_client
 logger = logging.getLogger(__name__)
 
 TERMINAL_JOB_STATUSES = {"complete", "failed"}
-DEFAULT_BYTES_PER_ELEMENT = 4
-NETCDF_TYPE_BYTES = {
-    "byte": 1,
-    "char": 1,
-    "ubyte": 1,
-    "short": 2,
-    "ushort": 2,
-    "int": 4,
-    "uint": 4,
-    "float": 4,
-    "int64": 8,
-    "uint64": 8,
-    "double": 8,
-}
 _job_locks = {}
 _job_locks_guard = threading.Lock()
 
@@ -109,7 +92,6 @@ def build_job_status(job_id, args, status, **extra):
         "status_url": status_url(job_id),
         "download_url": output_url(args),
         "output_filename": output_filename(args),
-        "backend": args.get("backend", "nco"),
         "updated_at": utcnow_iso(),
     }
     payload.update(extra)
@@ -257,32 +239,14 @@ def response_json(payload, status=200):
     return Response(json.dumps(payload), status=status, mimetype="application/json")
 
 
-def chunk_byte_budget():
-    return int(os.getenv("NCPARTITIONER_CHUNK_BYTES", 1024 * 1024 * 1024))
-
-
-def bytes_per_element(source_bytes=None):
-    configured = os.getenv("NCPARTITIONER_BYTES_PER_ELEMENT")
-    if configured is not None:
-        return int(configured)
-    if source_bytes is not None:
-        return source_bytes
-    return DEFAULT_BYTES_PER_ELEMENT
-
-
-def time_windows(args, source_bytes=None, byte_budget=None):
+def time_windows(args, source_bytes, byte_budget):
     start, end = args["time"]
     lat0, lat1 = args["lat"]
     lon0, lon1 = args["lon"]
     n_lat, n_lon = lat1 - lat0 + 1, lon1 - lon0 + 1
-    bytes_per_step = max(n_lat * n_lon * bytes_per_element(source_bytes), 1)
-    budget = chunk_byte_budget() if byte_budget is None else byte_budget
-    window = max(1, budget // bytes_per_step)
+    bytes_per_step = max(n_lat * n_lon * source_bytes, 1)
+    window = max(1, byte_budget // bytes_per_step)
     return [(s, min(s + window - 1, end)) for s in range(start, end + 1, window)]
-
-
-def chunk_output_filepath(job_id, index):
-    return os.path.join(job_temp_dir(job_id), f"chunk_{index:04d}.nc")
 
 
 def final_temp_filepath(job_id, args):
@@ -293,21 +257,8 @@ def deflate_level():
     return int(os.getenv("NCPARTITIONER_DEFLATE_LEVEL", 1))
 
 
-def compress_intermediate_chunks():
-    return os.getenv("NCPARTITIONER_COMPRESS_INTERMEDIATE_CHUNKS") == "true"
-
-
 def compress_final_output():
     return os.getenv("NCPARTITIONER_COMPRESS_FINAL_OUTPUT") == "true"
-
-
-def ncrcat_threads():
-    return max(1, int(os.getenv("NCPARTITIONER_NCRCAT_THREADS", 1)))
-
-
-def chunk_cache_bytes():
-    """HDF5 per-variable chunk cache size for generated netCDF4 files."""
-    return int(os.getenv("NCPARTITIONER_CNK_CSH_BYTES", 64 * 1024 * 1024))
 
 
 def netcdf4_slab_byte_budget():
@@ -315,189 +266,12 @@ def netcdf4_slab_byte_budget():
     return int(os.getenv("NCPARTITIONER_NETCDF4_SLAB_BYTES", 64 * 1024 * 1024))
 
 
-def chunk_cache_flags():
-    """Set NCO's cache without changing the source file's chunk layout."""
-    return [
-        "--cnk_csh",
-        str(chunk_cache_bytes()),
-    ]
-
-
-def ncks_time_chunk_size(args, source_bytes):
-    """Derive an output time chunk that fits the direct ncks byte budget."""
-    lat0, lat1 = args["lat"]
-    lon0, lon1 = args["lon"]
-    bytes_per_timestep = max((lat1 - lat0 + 1) * (lon1 - lon0 + 1) * source_bytes, 1)
-    requested_budget = int(
-        os.getenv("NCPARTITIONER_NCKS_CHUNK_BYTES", chunk_cache_bytes())
-    )
-    # NetCDF4 cannot create chunks of 4 GiB or larger.
-    safe_budget = min(max(1, requested_budget), 4 * 1024**3 - 1)
-    return max(1, safe_budget // bytes_per_timestep)
-
-
-def source_variable_bytes_from_header(header, variable):
-    declaration_prefix = f"{variable}("
-    for line in header.splitlines():
-        stripped = line.strip()
-        if not stripped.endswith(";") or declaration_prefix not in stripped:
-            continue
-        left_side = stripped.split("(", 1)[0].strip()
-        parts = left_side.split()
-        if len(parts) != 2 or parts[1] != variable:
-            continue
-        return NETCDF_TYPE_BYTES.get(parts[0], DEFAULT_BYTES_PER_ELEMENT)
-    return DEFAULT_BYTES_PER_ELEMENT
-
-
-def inspect_source(source_filepath, variable):
-    """Read the source file's header (a single `ncdump -hs`) to determine
-    whether `time` is already the record (UNLIMITED) dimension, what
-    deflate level the variable is already stored at, and the variable's
-    storage width in bytes.
-    """
-    is_unlimited = False
-    level = 0
-    variable_bytes = DEFAULT_BYTES_PER_ELEMENT
-    try:
-        result = subprocess.run(
-            ["ncdump", "-hs", source_filepath],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            check=True,
-        )
-        output = result.stdout or ""
-        is_unlimited = "UNLIMITED" in output
-
-        variable_bytes = source_variable_bytes_from_header(output, variable)
-
-        marker = f"{variable}:_DeflateLevel"
-        for line in output.splitlines():
-            stripped = line.strip()
-            if stripped.startswith(marker):
-                try:
-                    level = int(stripped.split("=")[1].strip().rstrip(" ;"))
-                except (IndexError, ValueError):
-                    level = 0
-                break
-    except (subprocess.CalledProcessError, OSError):
-        is_unlimited = False
-        level = 0
-        variable_bytes = DEFAULT_BYTES_PER_ELEMENT
-
-    return is_unlimited, level, variable_bytes
-
-
-def chunk_deflate_level(source_deflate, target_deflate):
-    """Compression level to force on every chunk during slicing.
-    Preserves the source's existing level if it has one.
-    """
-    return source_deflate if source_deflate > 0 else target_deflate
-
-
-def slice_command(
-    args,
-    source_filepath,
-    destination,
-    time_start,
-    time_end,
-    chunk_level,
-    add_record_dimension=False,
-    time_chunk_size=None,
-):
-    command = [
-        "ncks",
-        "-O",
-        "-h",
-        "--no_tmp_fl",
-        "-4",
-    ]
-    command.extend(chunk_cache_flags())
-    if chunk_level is not None:
-        command.extend(["-L", str(chunk_level)])
-    if add_record_dimension:
-        command.extend(["--mk_rec_dmn", "time"])
-    if time_chunk_size is not None:
-        command.extend(["--cnk_dmn", f"time,{time_chunk_size}"])
-    command.extend(
-        [
-            "-v",
-            f"{args['variable']}",
-            "-d",
-            f"time,{time_start},{time_end}",
-            "-d",
-            f"lat,{args['lat'][0]},{args['lat'][1]}",
-            "-d",
-            f"lon,{args['lon'][0]},{args['lon'][1]}",
-            source_filepath,
-            destination,
-        ]
-    )
-    return command
-
-
-def record_chunk_output_filepath(job_id, index):
-    return os.path.join(job_temp_dir(job_id), f"record_chunk_{index:04d}.nc")
-
-
-def make_record_dimension_command(source, destination, args, chunk_level=None):
-    command = [
-        "ncks",
-        "-O",
-        "-h",
-        "--no_tmp_fl",
-        "-4",
-        "--mk_rec_dmn",
-        "time",
-    ]
-    command.extend(chunk_cache_flags())
-    if chunk_level is not None:
-        command.extend(["-L", str(chunk_level)])
-    command.extend([source, destination])
-    return command
-
-
-def concat_command(chunk_paths, destination, args, final_level=None):
-    command = [
-        "ncrcat",
-        "-O",
-        "-h",
-        "--no_tmp_fl",
-        "-4",
-    ]
-    if final_level is not None:
-        command.extend(["-L", str(final_level)])
-    command.extend(chunk_cache_flags())
-
-    threads = ncrcat_threads()
-    if threads > 1:
-        command.extend(["-t", str(threads)])
-    command.extend([*chunk_paths, destination])
-    return command
-
-
 def cleanup_job_temp_dir(job_id):
     shutil.rmtree(job_temp_dir(job_id), ignore_errors=True)
 
 
-def subprocess_error_message(exc, cmd):
-    if isinstance(exc, OSError):
-        return "Subset request failed due to a processing error. Please try again."
-
-    step = cmd[0] if cmd else "subprocess"
-    if step == "ncrcat":
-        return "Subset assembly failed. Try a smaller time or spatial range."
-    if step == "ncks":
-        return "Subset extraction failed. Try a smaller time or spatial range."
-    return "Subset request failed. Please try again."
-
-
 def fail_job(job_id, args, error, *, returncode=None):
-    """Mark a job as failed, preserving its original started_at if known,
-    and clean up any temp chunk files. Used for both per-step subprocess
-    failures and post-hoc validation failures (e.g. missing output file).
-    """
+    """Mark a job as failed and clean up its unpublished output file."""
     existing = read_job_status(job_id)
     write_job_status(
         job_id,
@@ -512,387 +286,6 @@ def fail_job(job_id, args, error, *, returncode=None):
         ),
     )
     cleanup_job_temp_dir(job_id)
-
-
-# Sentinel distinguishing "step failed, job already marked failed" from a
-# real stderr string (which may be empty/None on a clean run).
-_STEP_FAILED = object()
-
-
-def run_subprocess(cmd):
-    result = subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        check=True,
-    )
-    return result.stdout.strip() if result.stdout else None
-
-
-def log_subprocess_failure(job_id, cmd, exc, *, fallback=False):
-    log = logger.warning if fallback else logger.exception
-    log(
-        "Slice job %s subprocess failed: cmd=%s returncode=%s output=%r",
-        job_id,
-        cmd,
-        getattr(exc, "returncode", None),
-        getattr(exc, "stdout", None) or getattr(exc, "stderr", None),
-    )
-
-
-def run_subprocess_step(job_id, args, cmd):
-    """Run a subprocess step. Returns stripped output (or None) on success.
-    On failure, fails the job and returns _STEP_FAILED.
-    """
-    try:
-        return run_subprocess(cmd)
-    except (subprocess.CalledProcessError, OSError) as exc:
-        log_subprocess_failure(job_id, cmd, exc)
-        fail_job(
-            job_id,
-            args,
-            subprocess_error_message(exc, cmd),
-            returncode=getattr(exc, "returncode", None),
-        )
-        return _STEP_FAILED
-
-
-def try_subprocess_step(job_id, cmd):
-    """Run a subprocess step without mutating job status on failure."""
-    try:
-        return True, run_subprocess(cmd), None
-    except (subprocess.CalledProcessError, OSError) as exc:
-        log_subprocess_failure(job_id, cmd, exc, fallback=True)
-        return False, None, exc
-
-
-def looks_like_missing_record_dimension(exc):
-    output = (
-        getattr(exc, "stdout", None) or getattr(exc, "stderr", None) or ""
-    ).lower()
-    return (
-        "record" in output
-        or "unlimited" in output
-        or "no variables fit criteria" in output
-    )
-
-
-DEFAULT_MAX_WORKERS = 1
-
-
-def max_workers(num_windows):
-    configured = int(os.getenv("NCPARTITIONER_MAX_WORKERS", DEFAULT_MAX_WORKERS))
-    return max(1, min(configured, num_windows))
-
-
-def total_file_size(paths):
-    return sum(os.path.getsize(path) for path in paths if os.path.exists(path))
-
-
-def concat_chunks_with_fallback(
-    job_id, args, chunk_paths, destination, chunk_level=None, final_level=None
-):
-    command = concat_command(chunk_paths, destination, args, final_level=final_level)
-    success, stderr, exc = try_subprocess_step(job_id, command)
-    if success:
-        return [stderr] if stderr else []
-
-    if not looks_like_missing_record_dimension(exc):
-        fail_job(
-            job_id,
-            args,
-            subprocess_error_message(exc, command),
-            returncode=getattr(exc, "returncode", None),
-        )
-        return _STEP_FAILED
-
-    logger.info(
-        "Slice job %s ncrcat fallback triggered; converting chunks to record dimension",
-        job_id,
-    )
-    write_running_job_status(
-        job_id,
-        args,
-        phase="converting_record_dimension",
-        chunks_complete=len(chunk_paths),
-        chunks_total=len(chunk_paths),
-        ncrcat_fallback=True,
-    )
-
-    converted_paths = [None] * len(chunk_paths)
-    conversion_messages = []
-    workers = max_workers(len(chunk_paths))
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {
-            pool.submit(
-                run_subprocess_step,
-                job_id,
-                args,
-                make_record_dimension_command(
-                    chunk_path,
-                    record_chunk_output_filepath(job_id, index),
-                    args,
-                    chunk_level,
-                ),
-            ): index
-            for index, chunk_path in enumerate(chunk_paths)
-        }
-        for future in concurrent.futures.as_completed(futures):
-            index = futures[future]
-            stderr = future.result()
-            if stderr is _STEP_FAILED:
-                return _STEP_FAILED
-            if stderr:
-                conversion_messages.append(stderr)
-            converted_paths[index] = record_chunk_output_filepath(job_id, index)
-
-    retry_command = concat_command(
-        converted_paths, destination, args, final_level=final_level
-    )
-    success, stderr, retry_exc = try_subprocess_step(job_id, retry_command)
-    if not success:
-        fail_job(
-            job_id,
-            args,
-            subprocess_error_message(retry_exc, retry_command),
-            returncode=getattr(retry_exc, "returncode", None),
-        )
-        return _STEP_FAILED
-
-    messages = conversion_messages
-    if stderr:
-        messages.append(stderr)
-    return messages
-
-
-def execute_nco_slice_job(job_id, args):
-    """Run one slice job with the existing ncks/ncrcat pipeline."""
-    source_filepath = input_filepath(args)
-    final_path = output_filepath(args)
-    source_is_unlimited, source_level, source_bytes = inspect_source(
-        source_filepath, args["variable"]
-    )
-    windows = time_windows(args, source_bytes)
-    workers = max_workers(len(windows))
-    lookahead = workers
-    completed_chunks, in_flight = {}, {}
-    next_to_submit = 0
-    stderr_messages = []
-    job_started = monotonic()
-    needs_record_dimension = not source_is_unlimited
-    source_compression_level = chunk_deflate_level(source_level, deflate_level())
-    chunk_level = source_compression_level if compress_intermediate_chunks() else None
-    final_level = source_compression_level if compress_final_output() else None
-
-    logger.info(
-        "Slice job %s extracting %s chunks with %s workers; chunk_byte_budget=%s "
-        "source_bytes_per_element=%s intermediate_chunk_deflate=%s "
-        "final_deflate_level=%s needs_record_dimension=%s",
-        job_id,
-        len(windows),
-        workers,
-        chunk_byte_budget(),
-        source_bytes,
-        chunk_level,
-        final_level,
-        needs_record_dimension,
-    )
-    write_running_job_status(
-        job_id,
-        args,
-        phase="extracting",
-        chunks_complete=0,
-        chunks_total=len(windows),
-    )
-
-    def slice_one(index, time_start, time_end):
-        chunk_path = chunk_output_filepath(job_id, index)
-        stderr = run_subprocess_step(
-            job_id,
-            args,
-            slice_command(
-                args,
-                source_filepath,
-                chunk_path,
-                time_start,
-                time_end,
-                chunk_level,
-                add_record_dimension=needs_record_dimension,
-            ),
-        )
-        return index, chunk_path, stderr
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-
-        def submit_more():
-            nonlocal next_to_submit
-            while (
-                next_to_submit < len(windows)
-                and next_to_submit - len(completed_chunks) < workers + lookahead
-            ):
-                time_start, time_end = windows[next_to_submit]
-                future = pool.submit(slice_one, next_to_submit, time_start, time_end)
-                in_flight[future] = next_to_submit
-                next_to_submit += 1
-
-        submit_more()
-        while in_flight:
-            done, _ = concurrent.futures.wait(
-                in_flight, return_when=concurrent.futures.FIRST_COMPLETED
-            )
-            for future in done:
-                in_flight.pop(future)
-                index, chunk_path, stderr = future.result()
-                if stderr is _STEP_FAILED:
-                    return
-                if stderr:
-                    stderr_messages.append(stderr)
-                completed_chunks[index] = chunk_path
-
-            write_running_job_status(
-                job_id,
-                args,
-                phase="extracting",
-                chunks_complete=len(completed_chunks),
-                chunks_total=len(windows),
-            )
-            submit_more()
-
-    extraction_finished = monotonic()
-    ordered_chunk_paths = [completed_chunks[index] for index in range(len(windows))]
-    temp_final_path = final_temp_filepath(job_id, args)
-    chunk_bytes = total_file_size(ordered_chunk_paths)
-    logger.info(
-        "Slice job %s extracted %s chunks (%s bytes) in %.2fs; starting ncrcat",
-        job_id,
-        len(ordered_chunk_paths),
-        chunk_bytes,
-        extraction_finished - job_started,
-    )
-    write_running_job_status(
-        job_id,
-        args,
-        phase="merging",
-        chunks_complete=len(ordered_chunk_paths),
-        chunks_total=len(windows),
-        chunk_bytes=chunk_bytes,
-    )
-    if len(ordered_chunk_paths) == 1 and final_level is None:
-        os.replace(ordered_chunk_paths[0], temp_final_path)
-    else:
-        merge_messages = concat_chunks_with_fallback(
-            job_id,
-            args,
-            ordered_chunk_paths,
-            temp_final_path,
-            chunk_level=chunk_level,
-            final_level=final_level,
-        )
-        if merge_messages is _STEP_FAILED:
-            return
-        stderr_messages.extend(msg for msg in merge_messages if msg)
-    os.replace(temp_final_path, final_path)
-    merge_finished = monotonic()
-    logger.info(
-        "Slice job %s finished ncrcat in %.2fs; final size=%s bytes",
-        job_id,
-        merge_finished - extraction_finished,
-        os.path.getsize(final_path) if os.path.exists(final_path) else None,
-    )
-
-    cleanup_job_temp_dir(job_id)
-    payload = read_job_status(job_id)
-    if payload is None:
-        logger.warning("Slice job %s lost its status record", job_id)
-        return
-
-    if len(completed_chunks) == len(windows) and os.path.isfile(final_path):
-        write_job_status(
-            job_id,
-            build_job_status(
-                job_id,
-                args,
-                "complete",
-                started_at=payload.get("started_at"),
-                completed_at=utcnow_iso(),
-                operator_warnings=[msg for msg in stderr_messages if msg],
-            ),
-        )
-        return
-
-    fail_job(job_id, args, "Slice job did not create an output file")
-
-
-def execute_ncks_slice_job(job_id, args):
-    """Run one ncks process over the complete requested hyperslab."""
-    source_filepath = input_filepath(args)
-    temporary_output = final_temp_filepath(job_id, args)
-    final_path = output_filepath(args)
-    source_is_unlimited, source_level, source_bytes = inspect_source(
-        source_filepath, args["variable"]
-    )
-    final_level = (
-        chunk_deflate_level(source_level, deflate_level())
-        if compress_final_output()
-        else 0
-    )
-    output_time_chunk_size = ncks_time_chunk_size(args, source_bytes)
-
-    logger.info(
-        "Slice job %s extracting one complete hyperslab with ncks; "
-        "final_deflate_level=%s output_time_chunk_size=%s "
-        "needs_record_dimension=%s",
-        job_id,
-        final_level,
-        output_time_chunk_size,
-        not source_is_unlimited,
-    )
-    write_running_job_status(
-        job_id,
-        args,
-        phase="extracting",
-        chunks_complete=0,
-        chunks_total=1,
-    )
-    stderr = run_subprocess_step(
-        job_id,
-        args,
-        slice_command(
-            args,
-            source_filepath,
-            temporary_output,
-            args["time"][0],
-            args["time"][1],
-            final_level,
-            add_record_dimension=not source_is_unlimited,
-            time_chunk_size=output_time_chunk_size,
-        ),
-    )
-    if stderr is _STEP_FAILED:
-        return
-
-    if not os.path.isfile(temporary_output):
-        fail_job(job_id, args, "Slice job did not create an output file")
-        return
-
-    os.replace(temporary_output, final_path)
-    cleanup_job_temp_dir(job_id)
-    payload = read_job_status(job_id)
-    if payload is None:
-        logger.warning("Slice job %s lost its status record", job_id)
-        return
-    write_job_status(
-        job_id,
-        build_job_status(
-            job_id,
-            args,
-            "complete",
-            started_at=payload.get("started_at"),
-            completed_at=utcnow_iso(),
-            operator_warnings=[stderr] if stderr else [],
-        ),
-    )
 
 
 def _copy_netcdf_attributes(source, destination, *, exclude=()):
@@ -1063,12 +456,8 @@ def execute_netcdf4_slice_job(job_id, args):
 
 
 def execute_slice_job(job_id, args):
-    """Run one queued slice job using its selected backend."""
-    if args.get("backend", "nco") == "netcdf4":
-        return execute_netcdf4_slice_job(job_id, args)
-    if args.get("backend", "nco") == "ncks":
-        return execute_ncks_slice_job(job_id, args)
-    return execute_nco_slice_job(job_id, args)
+    """Run one queued bounded-memory NetCDF4 slice job."""
+    return execute_netcdf4_slice_job(job_id, args)
 
 
 def slice(args):
@@ -1106,7 +495,6 @@ def slice(args):
             "status_url": status_url(job_id),
             "download_url": output_url(args),
             "output_filename": output_filename(args),
-            "backend": args.get("backend", "nco"),
         },
         status=202,
     )

@@ -1,7 +1,16 @@
 import re
 import os
 import time
-import subprocess
+
+import netCDF4
+
+
+def source_filepath(args):
+    filename = f"{args['basename']}.{args['extension']}"
+    absolute_path = os.path.join(os.sep, args["dirname"], filename)
+    if os.path.isfile(absolute_path):
+        return absolute_path
+    return os.path.join(args["dirname"], filename)
 
 
 def check_filepath(filepath):
@@ -96,18 +105,9 @@ def check_targets_dds(targets, args):
     if targets in ["lat", "lon", "time"]:  # an expected dimension
         return {"target": targets}
     elif re.match(r"^[a-zA-Z0-9_]+$", targets):  # a possible variable name
-        # see if variable exists in file
-        metadata = subprocess.check_output(
-            [
-                "ncks",
-                "-m",
-                f"/{args['dirname']}/{args['basename']}.{args['extension']}",
-            ]
-        ).decode("utf-8")
-        varreg = re.search(rf"{targets}\((.+),(.+),(.+)\)", metadata)
-        if varreg:
-            return {"target": targets}
-        else:
+        with netCDF4.Dataset(source_filepath(args)) as dataset:
+            if targets in dataset.variables:
+                return {"target": targets}
             raise ValueError(f"Variable {targets} not found in file")
     else:
         raise ValueError(f"Invalid target for DDS request: {targets}")
@@ -135,40 +135,23 @@ def check_targets_ascii(targets):
 
 def check_ranges(args):
     """make sure requested ranges are valid for the file"""
-    # grab netcdf metadata via ncks, parse it, and compare to requested ranges
-    metadata = subprocess.check_output(
-        ["ncks", "-m", f"/{args['dirname']}/{args['basename']}.{args['extension']}"]
-    ).decode("utf-8")
+    with netCDF4.Dataset(source_filepath(args)) as dataset:
+        if args["variable"] not in dataset.variables:
+            raise ValueError(f"Variable {args['variable']} not found in file")
 
-    # make sure this file contains this variable, and it has the relevant dimensions
-    varreg = re.search(rf"{args['variable']}\((.+),(.+),(.+)\)", metadata)
-    if not varreg:
-        raise ValueError(f"Variable {args['variable']} not found in file")
-    for dim in ["time", "lat", "lon"]:
-        if dim not in varreg.groups():
-            raise ValueError(
-                f"Variable {args['variable']} does not have dimension {dim}"
-            )
-
-    # get dimension sizes and compare against request
-    for dim in ["lat", "lon", "time"]:
-        dim_size = -1
-        dimreg = re.search(rf"    {dim} = (\d+) ;", metadata)
-        if dimreg:
-            dim_size = int(dimreg.group(1))
-        else:  # for unlimited dimensions (normally time)
-            dimreg = re.search(
-                rf"    {dim} = UNLIMITED ; \/\/ \((\d+) currently\)", metadata
-            )
-            if dimreg:
-                dim_size = int(dimreg.group(1))
-
-        if dim_size >= 0:
-            if args[dim][1] >= dim_size:
+        variable = dataset.variables[args["variable"]]
+        for dim in ["time", "lat", "lon"]:
+            if dim not in variable.dimensions:
                 raise ValueError(
-                    f"Requested range for dimension {dim} exceeds file size: requested end {args[dim][1]}, file size {dim_size}"
+                    f"Variable {args['variable']} does not have dimension {dim}"
                 )
-        else:
-            raise ValueError(f"Dimension {dim} not found in file")
+
+        for dim in ["lat", "lon", "time"]:
+            if dim not in dataset.dimensions:
+                raise ValueError(f"Dimension {dim} not found in file")
+            if args[dim][1] >= len(dataset.dimensions[dim]):
+                raise ValueError(
+                    f"Requested range for dimension {dim} exceeds file size: requested end {args[dim][1]}, file size {len(dataset.dimensions[dim])}"
+                )
 
     return args
