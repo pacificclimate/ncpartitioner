@@ -19,7 +19,8 @@ def check_filepath(filepath):
 
     # filepaths have an extra suffix to indicate what format the user wants
     # the response in. Valid options are .nc (data request),.dds amd .das (metadata requests)
-    filepath, request_format = os.path.splitext(filepath)
+    requested_filepath = filepath
+    filepath, request_format = os.path.splitext(requested_filepath)
     if request_format not in [".nc", ".dds", ".das", ".ascii", ".asc"]:
         raise ValueError(
             f"Invalid request format: must be .nc, .dds, .das, or .ascii/.asc : {request_format}"
@@ -34,13 +35,12 @@ def check_filepath(filepath):
     data_root = os.getenv("DATA_ROOT", "storage/").lstrip("/")
     if not filepath.lstrip("/").startswith(data_root):
         raise ValueError(f"Invalid filepath: must start with {data_root} : {filepath}")
-    # reamining filepath may end in .nc, or may be missing an extension, but must not have any
-    # other extension.
-    stem, extension = os.path.splitext(filepath)
-    if extension and extension != ".nc":
+    # For partition requests, a single .nc identifies both the source type and the
+    # request format. Continue accepting the legacy source.nc.nc form as well.
+    if request_format == ".nc" and not filepath.endswith(".nc"):
+        filepath = requested_filepath
+    if not filepath.endswith(".nc"):
         raise ValueError(f"Invalid filepath: must be a .nc file {filepath}")
-    if not extension:  # add "missing" extension
-        filepath = f"{filepath}.nc"
     if not os.path.isfile(f"/{filepath}"):
         raise ValueError(
             f"Invalid filepath: file does not exist or is not accessible. {filepath}"

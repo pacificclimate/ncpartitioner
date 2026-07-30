@@ -8,12 +8,16 @@ from ncpartitioner.sanitize import check_filepath, check_targets_slice, check_ra
     "filepath, valid, error",
     [
         ("fake/tests/tasmax.nc", False, "Invalid filepath: must start with"),
+        ("tests/data/tasmax.nc", True, None),
         ("tests/data/tasmax.nc.nc", True, None),
         ("tests/data/tasmax.nc.das", True, None),
         ("tests/data/tasmax.nc.dds", True, None),
+        ("tests/data/tasmax", False, "Invalid request format"),
+        ("tests/data/tasmax.txt", False, "Invalid request format"),
+        ("tests/data/tasmax.csv", False, "Invalid request format"),
         ("tests/data/tasmax.nc.banana", False, "Invalid request format"),
         ("tests/data/missing.nc.nc", False, "Invalid filepath: file does not exist"),
-        ("tests/data/tasmax.txt.nc", False, "Invalid filepath: must be a .nc file"),
+        ("tests/data/tasmax.txt.nc", False, "Invalid filepath: file does not exist"),
     ],
 )
 def test_check_filepath(filepath, valid, error):
@@ -29,7 +33,10 @@ def test_check_filepath(filepath, valid, error):
         assert str(excinfo.value).startswith(error)
 
 
-def test_check_filepath_preserves_multi_dot_basename(tmp_path, monkeypatch):
+@pytest.mark.parametrize("request_suffix", ["", ".nc"])
+def test_check_filepath_preserves_multi_dot_basename(
+    tmp_path, monkeypatch, request_suffix
+):
     data_root = tmp_path / "data"
     dataset_dir = data_root / "vicgl"
     dataset_dir.mkdir(parents=True)
@@ -37,7 +44,7 @@ def test_check_filepath_preserves_multi_dot_basename(tmp_path, monkeypatch):
     dataset.write_text("", encoding="utf-8")
     monkeypatch.setenv("DATA_ROOT", str(data_root).lstrip("/"))
 
-    args = check_filepath(f"{dataset}.nc")
+    args = check_filepath(f"{dataset}{request_suffix}")
 
     assert args["dirname"] == str(dataset_dir)
     assert args["basename"] == "allwsbc.TPS_gridded_obs_init.1945to2099.GLAC_MBAL"

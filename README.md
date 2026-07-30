@@ -58,7 +58,9 @@ Redirects to a THREDDS page displaying metadata about all variables and attribut
 Redirects to a THREDDS page displaying values for the requested dimension variable(s) in ASCII format. This server will only display values for dimension variables (`lat`, `lon`, and `time`) via this request type. OpenDAP standards support requesting any variable in ASCII format this way, but since THREDDS has a 500MB maximum file size for DAP requests, this server only supports requesting the dimension variables, not multidimensional data variables.
 
 ### Partition request
-`https://server/partition/?filepath=path/to/file.nc.nc&targets=time[0:10],lat[0:20],lon[0:30],tasmax[0:10][0:20][0:30]`
+`https://server/partition/?filepath=path/to/file.nc&targets=time[0:10],lat[0:20],lon[0:30],tasmax[0:10][0:20][0:30]`
+
+The legacy `file.nc.nc` form is also accepted.
 
 Starts an asynchronous slice job. The initial response is `202 Accepted` with a JSON body containing:
 
