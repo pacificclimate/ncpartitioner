@@ -1,13 +1,12 @@
 # NCPartitioner
 
-This container generates user-requested netCDF files using `ncks` and makes them available for download via THREDDS.
+This container writes bounded-memory NetCDF4 subsets and makes them available for download via THREDDS.
 
 ## Run for Development
 
-The Unidata netCDF tools must be installed. This package can be installed with poetry:
+This package can be installed with poetry:
 
 ```
-apt get install nco
 github clone http://github.com/pacificclimate/ncpartitioner
 poetry install
 ```
@@ -18,6 +17,10 @@ To do end-to-end testing, you will also need a THREDDS instance running on your 
 * `THREDDS_HTTP_BASE` - the base URL for the THREDDS http server (probably ends /fileserver); a user will be redirected to download the completed file
 * `THREDDS_DAP_BASE` - the base URL for the THREDDS openDAP server (probably ends /dodsC): used to fulfill metadata requests
 * `DATA_ROOT` - directory under which all data is found; prevents files outside the directory from being served
+* `NCPARTITIONER_NETCDF4_SLAB_BYTES` - optional maximum primary data slab size for the direct writer; defaults to `67108864` (64 MiB). Larger values reduce slab-loop overhead but increase peak memory use.
+* `NCPARTITIONER_DEFLATE_LEVEL` - optional NetCDF4 compression level when final compression is enabled; defaults to `1`.
+* `NCPARTITIONER_COMPRESS_FINAL_OUTPUT` - optional toggle for final output compression. Defaults to `false`. Only the literal value `true` enables compression.
+* `NCPARTITIONER_QUEUE_IDLE_TTL_SECONDS` - optional queued-job heartbeat timeout. A queued job that is not polled via `status_url` within this many seconds is failed and discarded; defaults to `300`.
 
 Run with flask:
 ```
@@ -35,7 +38,7 @@ This server assumes all files to be downloaded are netCDF4 files with dimensions
 
 ## Request format
 
-Request format is indicated by concatenating an extension onto the `filepath` parameter. Some request formats require an additional `targets` parameter. Request attributes other than `targets` and `filepath` are ignored.
+Request format is indicated by concatenating an extension onto the `filepath` parameter. Some request formats require an additional `targets` parameter.
 
 This server supports four request formats. Three of them are simply redirected to the THREDDS server:
 
@@ -55,6 +58,44 @@ Redirects to a THREDDS page displaying metadata about all variables and attribut
 Redirects to a THREDDS page displaying values for the requested dimension variable(s) in ASCII format. This server will only display values for dimension variables (`lat`, `lon`, and `time`) via this request type. OpenDAP standards support requesting any variable in ASCII format this way, but since THREDDS has a 500MB maximum file size for DAP requests, this server only supports requesting the dimension variables, not multidimensional data variables.
 
 ### Partition request
-`https://server/partition/?filepath=path/to/file.nc.nc&targets=time[0:10],lat[0:20],lon[0:30],tasmax[0:10][0:20][0:30]`
+`https://server/partition/?filepath=path/to/file.nc&targets=time[0:10],lat[0:20],lon[0:30],tasmax[0:10][0:20][0:30]`
 
-Creates a file with the requested dimensions using `ncks`, then redirects the user to the THREDDS page to download the newly created file. Note that the variable is always trimmed to the hyperslab specified in the dimensions portion of the `targets` attribute; if the variable portion of the `targets` attribute is different, it will be overruled.
+The legacy `file.nc.nc` form is also accepted.
+
+Starts an asynchronous slice job. The initial response is `202 Accepted` with a JSON body containing:
+
+* `status` - always `queued` for the initial response
+* `job_id` - server-generated identifier for the slice job
+* `queue_position` - current queue position when available
+* `status_url` - relative polling path in the form `partition/status/<job_id>`; intentionally no leading slash
+* `download_url` - final THREDDS download URL for the output file
+* `output_filename` - final output filename
+
+The frontend should poll `status_url` until it receives a terminal job state. Current job states are:
+
+* `running`
+* `complete`
+* `failed`
+
+Queued jobs now carry two timestamps:
+
+* `queued_at` - when the job entered the Dragonfly-backed queue
+* `last_seen_at` - refreshed on each `status_url` poll while the job is still queued
+
+If a queued job is not polled within `NCPARTITIONER_QUEUE_IDLE_TTL_SECONDS`, it is treated as abandoned, failed, and removed from Dragonfly instead of lingering indefinitely.
+
+Running jobs include progress fields:
+
+* `phase` - currently `extracting`
+* `chunks_complete` - number of direct-write slabs completed
+* `chunks_total` - total direct-write slabs
+
+Completed jobs keep the same `download_url` and `output_filename` values, so the frontend can start the download when status becomes `complete`.
+
+Direct-write notes:
+
+* The source variable is read and written in continuous time slabs bounded by `NCPARTITIONER_NETCDF4_SLAB_BYTES`.
+* The output is written under job-scoped `.jobs/<job_id>` storage and atomically renamed into the THREDDS-visible directory only after it has closed successfully.
+* Disabling final compression provides the highest write throughput.
+
+Note that the variable is always trimmed to the hyperslab specified in the dimensions portion of the `targets` attribute; if the variable portion of the `targets` attribute is different, it will be overruled.
