@@ -1,6 +1,6 @@
 [project]
 name = "ncpartitioner"
-version = "0.2.0"
+version = "0.2.1"
 description = ""
 authors = [{ name = "Lee Zeman", email = "lzeman@uvic.ca" }, { name = "Quintin Sparks", email = "quintins@uvic.ca" }]
 readme = "README.md"

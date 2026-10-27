@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.2.1 - 2026-10-27
+
+### Security
+
+- Upgrade OS packages during the container image build to pick up the fix for CVE-2026-111497.
+
 ## 0.2.0 - 2026-09-08
 
 ### Added

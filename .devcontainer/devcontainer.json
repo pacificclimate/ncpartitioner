@@ -1,0 +1,60 @@
+// For format details, see https://aka.ms/devcontainer.json. For config options, see the README at:
+// https://github.com/microsoft/vscode-dev-containers/tree/v0.245.0/containers/python-3
+{
+  "name": "ncpartitioner",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "args": {
+      "VARIANT": "ubuntu-24.04"
+    }
+  },
+  // Configure tool-specific properties.
+  "customizations": {
+    // Configure properties specific to VS Code.
+    "vscode": {
+      // Set *default* container specific settings.json values on container create.
+      "settings": {
+        "remote.autoForwardPorts": false,
+        "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python"
+      },
+      // VSCODE ONLY: Add the IDs of extensions you want installed when the container is created.
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-python.black-formatter"
+      ]
+    }
+  },
+  // Use 'forwardPorts' to make a list of ports inside the container available locally.
+  //"forwardPorts": [8000],
+  "initializeCommand": "mkdir -p ${localEnv:HOME}/.claude && touch ${localEnv:HOME}/.claude.json",
+  // Use 'postCreateCommand' to run commands after the container is created.
+  "postCreateCommand": "bash ./.devcontainer/post-install.sh",
+  "postStartCommand": "bash ./.devcontainer/post-start.sh",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": "latest",
+    "ghcr.io/devcontainers/features/git:1": "latest",
+    // add python to container; matches the python:3.12 production image
+    "ghcr.io/devcontainers/features/python:1": {
+      "version": "3.12"
+    },
+    // add poetry to container
+    "ghcr.io/devcontainers-extra/features/poetry:2": {
+      "version": "2.4"
+    }
+  },
+  // Comment out to connect as root instead. More info: https://aka.ms/vscode-remote/containers/non-root.
+  "remoteUser": "vscode",
+  "runArgs": [
+    // give a nicer name to the container
+    "--name",
+    "ncpartitioner_devcontainer_${localEnv:USER}"
+  ],
+  "mounts": [
+    // Claude Code's config directory -- skills, plugins, agents, session
+    // history -- and its settings file, so they persist into the container
+    // instead of starting fresh each time.
+    "source=${localEnv:HOME}/.claude,target=/home/vscode/.claude,type=bind,consistency=cached",
+    "source=${localEnv:HOME}/.claude.json,target=/home/vscode/.claude.json,type=bind,consistency=cached"
+  ]
+}
